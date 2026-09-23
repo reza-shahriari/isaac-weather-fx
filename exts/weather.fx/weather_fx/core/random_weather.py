@@ -50,6 +50,10 @@ REGIMES: Dict[str, float] = {
     "storm": 0.03,
 }
 
+#: Day of the year the northern hemisphere is warmest (the southern one is half a year away).
+#: A few weeks after the solstice, because land and ocean lag the sun.
+NORTHERN_WARMEST_DAY = 196
+
 RegimeWeights = Mapping[str, float]
 
 
@@ -88,10 +92,15 @@ def _seasonal_temperature(rng: np.random.Generator, day_of_year: int, latitude: 
 
     A sinusoid about a latitude-dependent annual mean with a latitude-dependent amplitude, plus a
     few degrees of day-to-day scatter. Crude, and deliberately so -- its job is to stop the
-    randomiser producing snow in July at the equator, not to be a climate model. The hemisphere
-    flip is the part that is easy to forget and immediately obvious when wrong.
+    randomiser producing snow in July at the equator, not to be a climate model.
+
+    The phase is anchored on the **warmest** day of the year rather than the first of January,
+    because that is the number anyone can check: late July in the north, and half a year away in
+    the south. Anchoring it on the new year instead and hoping the sign works out is how this
+    function spent its first weeks putting a mild 17 degC December at 59 degN, which looks entirely
+    ordinary in a log line and is six months out.
     """
-    phase = 2.0 * np.pi * (day_of_year - 15.0) / 365.25
+    phase = 2.0 * np.pi * (day_of_year - NORTHERN_WARMEST_DAY) / 365.25
     if latitude < 0.0:
         phase += np.pi
     warmth = np.cos(np.radians(min(abs(latitude), 89.0)))

@@ -40,6 +40,7 @@ from typing import Any, Optional, Set
 import numpy as np
 
 from ...core.celestial import civil_twilight_fraction
+from ...core.meteorology import clear_sky_irradiance
 from ...core.sky import (
     SkyConditions,
     conditions_from_state,
@@ -58,35 +59,12 @@ MOON_PATH = f"{SKY_ROOT}/Moon"
 #: Luminous efficacy of daylight, lm/W. Converts the sun's irradiance into the photometric units
 #: a `DistantLight` intensity is quoted in.
 LUMINOUS_EFFICACY_DAYLIGHT = 105.0
-#: Extraterrestrial solar irradiance, W/m2.
-SOLAR_CONSTANT_W_M2 = 1361.0
-#: Broadband atmospheric transmittance at the zenith on a clear day. The airmass law is applied
-#: on top; this is the anchor.
-CLEAR_SKY_TRANSMITTANCE = 0.75
-
 #: Renderer-side level the *median daylight sky* is exposed to, in the units an RTX dome light's
 #: `intensity` multiplies its texture by. **Measured** by sweeping the intensity on a demo stage:
 #: intensity x median-sky-luminance near 100 renders the sky as mid-grey, near 400 it begins to
 #: wash out, and 10 is deep twilight. 300 puts a clear daytime sky where a camera's own
 #: auto-exposure would put it.
 DOME_EXPOSURE_TARGET = 300.0
-
-
-def _direct_normal_irradiance(elevation_deg: float, turbidity: float) -> float:
-    """Direct beam irradiance on a surface facing the sun, W/m2.
-
-    A Beer-Lambert law on the airmass with a turbidity-dependent optical depth. It reaches about
-    900 W/m2 for a high sun on a clear day, which is the number everyone knows, and collapses
-    through twilight -- so the sun light dims as it sets without anyone animating it.
-    """
-    if elevation_deg <= 0.0:
-        return 0.0
-    sin_el = math.sin(math.radians(elevation_deg))
-    # Kasten-Young airmass: the 1/sin form diverges at the horizon and would make a setting sun
-    # infinitely attenuated rather than merely red.
-    airmass = 1.0 / (sin_el + 0.50572 * (elevation_deg + 6.07995) ** -1.6364)
-    optical_depth = -math.log(CLEAR_SKY_TRANSMITTANCE) * (0.7 + 0.12 * turbidity)
-    return SOLAR_CONSTANT_W_M2 * math.exp(-optical_depth * airmass)
 
 
 class SkyEffect(Effect):
@@ -253,7 +231,11 @@ class SkyEffect(Effect):
                 up_axis,
                 enabled=bool(sky.sun_enabled) and conditions.sun.is_up,
                 intensity=(
-                    _direct_normal_irradiance(conditions.sun.elevation_deg, conditions.turbidity)
+                    float(
+                        clear_sky_irradiance(
+                            conditions.sun.elevation_deg, conditions.turbidity
+                        )[0]
+                    )
                     * LUMINOUS_EFFICACY_DAYLIGHT
                     * conditions.daylight
                     * scale

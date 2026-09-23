@@ -16,10 +16,14 @@ Everything an RTX camera renders is affected: the viewport, Replicator render pr
 | Snow     | Same volume system with fall-speed jitter and sway | flake density, size, fall speed, sway |
 | Wind     | Speed + direction with smooth gusts, applied to rain and snow | speed, direction, gusts |
 | Lighting | Scales scene light intensities for overcast looks | light scale, include dome lights |
+| Sky      | Sun and moon from the real ephemeris for a place, date and hour; a Perez daylight sky baked to an HDR dome, with moonlight and starlight at night | latitude, longitude, date, hour, turbidity, ground albedo, exposure |
+| Clouds   | A genuine three-dimensional density field (not an extruded map), shaded with multiple scattering and marched by the dome bake | cover, genus, base height, thickness, optical depth, feature size |
 
 Also included:
 - Presets (`clear`, `haze`, `light_fog`, `dense_fog`, `drizzle`, `moderate_rain`, `heavy_rain`, `storm`, `light_snow`, `blizzard`) and JSON save/load.
 - A **manual time source** for deterministic synthetic data generation (`seed` + `step(dt)`).
+- A **coherent randomiser** (`wx.randomize(seed)` or the panel's *Randomize* button): draws a whole scene from one integer, with the couplings that make it believable -- rain scavenges aerosol so the air between the drops is *clearer*, fog needs a tiny dew-point spread and no wind, snow needs sub-zero air.
+- A **surface-meteorology series** (`wx.surface_weather()`): air temperature, humidity, wind, cloud, irradiance, visibility and precipitation on a regular grid, so a thermal or sensor model integrates the same weather the camera is looking at. See [Weather as data](#weather-as-data).
 - Non-destructive edits: prims and light changes live in the **session layer**, and render settings are restored when an effect is turned off. Your USD files are never modified.
 
 ## Install
@@ -54,6 +58,24 @@ wx.clear()
 ```
 
 The UI panel and your scripts share the same controller, so a script change shows up in the panel immediately and vice versa (`wx.on_change(fn)` lets your own code listen too).
+
+### Weather as data
+
+The state describes an instant. A thermal model needs the hours before it, because a surface's
+temperature is an integral of its history:
+
+```python
+series = wx.surface_weather(hours=48, step_s=1800)
+print(series.describe())
+# 2024-06-20 10:00 UTC + 48 h, 97 samples  air 13.8 .. 24.2 degC  RH 44 .. 100 %
+#   peak DNI 872 W/m2  cloud 38 %  visibility 24.6 km
+series.columns()["t_air_k"]     # numpy, SI, ready for a solver
+```
+
+The air temperature passes through the state's own value at the state's own hour, so the series
+and a frame rendered at that instant describe the same moment. Dew point is held constant and
+humidity is derived from it -- that is the way round that gives a night which actually saturates.
+See `core/meteorology.py` for what varies, what is held constant, and why.
 
 **Standalone scripts:** see [`examples/standalone_weather_demo.py`](examples/standalone_weather_demo.py). It enables the extension from a script and cycles through presets:
 
@@ -133,11 +155,14 @@ wx.manager.get_backend("viewport").add_effect(LensDroplets())
 ## Known limitations (v0.1)
 
 - Rain density is physically derived, then thinned by `density_scale` to a renderable count. This is a visual control, not physics.
-- Snow density is a direct control; there is no snowfall-rate model yet.
+- Snow density is a direct control. The **water-equivalent rate** is now derived from the flake population (`core/meteorology.precipitation_rate_mm_h`), but the particle count is still what you set.
 - Precipitation does not reduce visibility by itself. Pair it with fog (the presets do this).
 - Particles are real geometry, so they are also visible to RTX lidar. This may or may not be what you want.
 - Particle positions are written through USD every frame. Large counts (>50k) will cost frame time; Fabric/USDRT writes are on the roadmap.
 - Presets are art-directed starting points, not calibrated weather.
+- The cloud field is a 60 m grid with 400 m features by default: right for a sky seen from the ground, soft if the camera is close enough to read individual turrets. Lower `cell_m` and `feature_m` and pay for the bake.
+- `surface_weather` is a diurnal *model*, not a forecast: what is genuinely diurnal (temperature, humidity, irradiance) varies, and what the state has no basis to vary (wind, cover, visibility) is held constant.
+- The regime weights, the diurnal swing and the turbidity-to-visibility curve are **estimated** -- a plausible spread for a mid-latitude site, not a climatology.
 
 ## Development
 

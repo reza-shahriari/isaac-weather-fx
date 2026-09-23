@@ -126,6 +126,19 @@ class WeatherController:
 
         return conditions_from_state(self.state, build_cloud=build_cloud)
 
+    def surface_weather(self, hours: float = 48.0, step_s: float = 1800.0, **kwargs):
+        """The diurnal surface-meteorology series implied by the current state.
+
+        Air temperature, humidity, wind, cloud, irradiance, visibility and precipitation on a
+        regular grid, in SI units -- what a thermal model integrates, and what this extension
+        hands to a sensor simulator so that one weather drives both the picture and the physics.
+        The state's own clock is the anchor; see
+        :func:`weather_fx.core.meteorology.diurnal_series`.
+        """
+        from .core.meteorology import diurnal_series
+
+        return diurnal_series(self.state, hours=hours, step_s=step_s, **kwargs)
+
     def enable(self, enabled: bool = True) -> None:
         self.set_general(enabled=enabled)
 

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "fog": {"enabled": true, "visibility_m": 180.0, "color": [0.85, 0.78, 0.72], "height_fog": true, "base_height_m": 0.0, "height_falloff": 0.8},
+  "lighting": {"enabled": true, "light_scale": 0.55},
+  "wind": {"speed_mps": 1.0, "direction_deg": 90.0}
+}

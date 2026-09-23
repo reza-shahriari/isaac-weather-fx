@@ -8,6 +8,7 @@ from ..base import SensorBackend
 from .fog import FogEffect
 from .lighting import LightingEffect
 from .precipitation import PrecipitationEffect
+from .sky import SkyEffect
 
 log = logging.getLogger("weather_fx")
 
@@ -16,7 +17,9 @@ class ViewportBackend(SensorBackend):
     name = "viewport"
 
     def __init__(self, effects=None):
-        self.effects = effects or [FogEffect(), PrecipitationEffect("rain"),
+        # The sky goes first: the fog and the precipitation read the lighting it authors, and an
+        # effect list is applied in order.
+        self.effects = effects or [SkyEffect(), FogEffect(), PrecipitationEffect("rain"),
                                    PrecipitationEffect("snow"), LightingEffect()]
 
     def add_effect(self, effect) -> None:

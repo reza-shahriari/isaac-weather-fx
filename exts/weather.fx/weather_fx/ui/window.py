@@ -16,6 +16,8 @@ from .widgets import UpdateGuard, make_binding
 
 SECTION_TITLES = {
     "general": "General",
+    "sky": "Sky, sun and moon",
+    "clouds": "Clouds",
     "fog": "Fog",
     "wind": "Wind",
     "rain": "Rain",
@@ -73,6 +75,11 @@ class WeatherWindow:
             ui.Button("Apply", width=70, clicked_fn=self._apply_preset)
         with ui.HStack(height=24, spacing=4):
             ui.Button("Clear all", clicked_fn=self._c.clear)
+            ui.Button("Randomize",
+                      tooltip="A coherent random day: regime first, then the parameters within "
+                              "it, so the cloud base matches the dew point and the rain comes "
+                              "with the deck that is producing it. Leaves General alone.",
+                      clicked_fn=self._randomize)
             ui.Button("Step 1/30 s", tooltip="Advance once (manual time source)",
                       clicked_fn=lambda: self._c.step(1.0 / 30.0))
             advanced = ui.SimpleBoolModel(self._show_advanced)
@@ -89,6 +96,11 @@ class WeatherWindow:
                     binding = make_binding(f, getattr(values, f.name),
                                            partial(self._commit, name, f.name), self._guard)
                     self._bindings[(name, f.name)] = binding
+
+    def _randomize(self):
+        """Draw a new day. Unseeded on purpose -- the button is for exploring, and a caller that
+        needs a reproducible one passes a seed to `controller.randomize(seed)`."""
+        self._c.randomize()
 
     def _build_io(self):
         with ui.CollapsableFrame("Save / Load", collapsed=True):

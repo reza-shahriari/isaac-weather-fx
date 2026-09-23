@@ -78,6 +78,54 @@ class WeatherController:
     def set_lighting(self, **values) -> None:
         self.configure(lighting=values)
 
+    def set_sky(self, **values) -> None:
+        """Place, date, hour, turbidity, exposure: ``set_sky(hour_utc=17.5, turbidity=4)``."""
+        self.configure(sky=values)
+
+    def set_clouds(self, **values) -> None:
+        """``set_clouds(enabled=True, cover=0.5, genus="cumulus")``."""
+        self.configure(clouds=values)
+
+    def set_time(self, hour_utc: float = None, date_utc: str = None) -> None:
+        """Scrub the clock. The sun, the moon, the sky colour and the shadows move together."""
+        values = {}
+        if hour_utc is not None:
+            values["hour_utc"] = float(hour_utc)
+        if date_utc is not None:
+            values["date_utc"] = str(date_utc)
+        if values:
+            self.configure(sky=values)
+
+    def set_site(self, latitude_deg: float, longitude_deg: float) -> None:
+        """Where on earth the scene is. Longitude is positive east."""
+        self.configure(sky={"latitude_deg": latitude_deg, "longitude_deg": longitude_deg})
+
+    # ------------------------------------------------------------ randomisation
+    def randomize(self, seed: int = None, **kwargs) -> str:
+        """Draw a coherent random weather and apply it. Returns the regime it chose.
+
+        Safe to call at runtime, from a UI button or from a dataset loop: the ``general`` section
+        is untouched, so a deterministic run stays on its manual clock and keeps its follow prim.
+
+        ``kwargs`` are passed to :func:`weather_fx.core.random_weather.random_overrides` --
+        ``regime=``, ``latitude_deg=``, ``night_fraction=`` and so on.
+        """
+        from .core.random_weather import random_overrides
+
+        overrides = random_overrides(seed, **kwargs)
+        self.configure(**{k: v for k, v in overrides.items() if v})
+        return kwargs.get("regime", "drawn")
+
+    def sky_conditions(self, build_cloud: bool = False):
+        """The resolved sun, moon and cloud for the current state -- what the sky actually is.
+
+        Every number in it is derived from the place and the clock, so this is the first thing to
+        print when a scene is lit from the wrong quarter.
+        """
+        from .core.sky import conditions_from_state
+
+        return conditions_from_state(self.state, build_cloud=build_cloud)
+
     def enable(self, enabled: bool = True) -> None:
         self.set_general(enabled=enabled)
 

@@ -1,0 +1,13 @@
+[project]
+name = "isaac-weather-fx"
+version = "0.1.0"
+description = "Fog, rain and snow for NVIDIA Isaac Sim"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+pythonpath = ["exts/weather.fx"]
+testpaths = ["tests"]

@@ -1,0 +1,22 @@
+[package]
+version = "0.1.0"
+title = "Weather FX"
+description = "Fog, rain and snow for the Isaac Sim viewport and RTX cameras, with a UI panel and a Python API. Built to extend to lidar and radar."
+category = "Simulation"
+keywords = ["weather", "fog", "rain", "snow", "sensor", "synthetic data", "isaac sim"]
+authors = ["<your name>"]
+repository = "https://github.com/<you>/isaac-weather-fx"
+readme = "docs/README.md"
+changelog = "docs/CHANGELOG.md"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.usd" = {}
+"omni.kit.viewport.utility" = {}
+"omni.kit.menu.utils" = {}
+
+[[python.module]]
+name = "weather_fx"
+
+[settings]
+exts."weather.fx".open_window_on_startup = false

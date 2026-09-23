@@ -273,6 +273,10 @@ MS_SHADOW_FLOOR = 0.45
 #: exactly parallel to the base never leaves through either plane, so it needs a length of its
 #: own rather than an infinity that would make the step size meaningless.
 _LEVEL_RAY_LENGTH_M = 40_000.0
+#: How fast the march's step size grows along the ray. 0 would be uniform spacing; 3 puts about
+#: a fifth of the samples in the first tenth of the path, which is where the transmittance is
+#: still high enough for a sample to matter.
+_MARCH_GROWTH = 3.0
 
 
 @dataclass
@@ -672,19 +676,41 @@ class CloudField:
         # accumulates unit optical depth in about 70 m of cloud, so anything beyond the cap is
         # behind a transmittance that has already underflowed. It is a **limit on the geometry,
         # not on the physics**, and it is the reason the step size stays near 100 m.
-        span = np.where(hit, np.minimum(far - near, max_path_m), 0.0)
-        dt = span / steps
         ox, oy, oz = origin[..., 0], origin[..., 1], origin[..., 2]
         dx, dy, dz = direction[..., 0], direction[..., 1], direction[..., 2]
+        span = np.where(hit, np.minimum(far - near, max_path_m), 0.0)
+
+        # **Geometric steps, not uniform ones.** A ray at 60 degrees of elevation crosses 1.4 km
+        # of slab and one at 5 degrees crosses the full cap, so a fixed step *count* samples the
+        # second at ten times the spacing of the first -- coarser than the clouds themselves,
+        # which is what draws the vertical streaks across the bottom of a frame. Placing the
+        # sample boundaries geometrically puts them close together near the camera, where the
+        # transmittance is still high and the detail is resolved, and lets them spread out where
+        # the cloud is already behind an optical depth of ten.
+        #
+        # The jitter is what turns the residue from banding into noise: the boundaries are offset
+        # by a per-ray fraction of a step, derived from the ray's own direction so it is
+        # deterministic and a frame is reproducible.
+        u = np.linspace(0.0, 1.0, steps + 1)
+        growth = np.expm1(_MARCH_GROWTH * u) / math.expm1(_MARCH_GROWTH)
+        jitter = (
+            np.modf(np.abs(dx) * 71.3 + np.abs(dy) * 131.7 + np.abs(dz) * 197.1)[0][..., None]
+            - 0.5
+        ) / steps
+        edges = span[..., None] * np.clip(growth + jitter, 0.0, 1.0)
+        edges = np.sort(edges, axis=-1)
+        centres = near[..., None] + 0.5 * (edges[..., 1:] + edges[..., :-1])
+        widths = np.diff(edges, axis=-1)
         for k in range(steps):
-            t = near + (k + 0.5) * dt
+            t = centres[..., k]
+            step = widths[..., k]
             px, py, pz = ox + dx * t, oy + dy * t, oz + dz * t
             sigma = self.density(px, py, pz) * self.extinction_per_m
-            d_tau = sigma * dt
+            d_tau = sigma * step
             # The weight is what *reaches the sensor* from this sample: extinction times the
             # transmittance back along the ray. Weighting by extinction alone would average in
             # cloud the sensor cannot see.
-            weight = sigma * transmittance * dt
+            weight = sigma * transmittance * step
             height_sum += weight * py
             height_weight += weight
             if radiance is not None:

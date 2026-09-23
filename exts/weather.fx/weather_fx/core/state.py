@@ -14,7 +14,7 @@ from typing import Any, Dict, Tuple
 
 log = logging.getLogger("weather_fx")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 Vec3 = Tuple[float, float, float]
 
 
@@ -127,6 +127,83 @@ class SnowParams(PrecipitationParams):
 
 
 @dataclass
+class SkyParams:
+    """Where on earth, when, and what the air is like. The sun and moon follow from these."""
+
+    enabled: bool = param(True, "Sky enabled",
+                          tooltip="Author the sky dome, the sun and the moon. Off leaves whatever "
+                                  "lighting the stage already has.")
+    latitude_deg: float = param(48.1, "Latitude", min=-90.0, max=90.0, unit="deg")
+    longitude_deg: float = param(11.6, "Longitude", min=-180.0, max=180.0, unit="deg",
+                                 tooltip="Positive east.")
+    date_utc: str = param("2024-06-21", "Date (UTC)",
+                          tooltip="YYYY-MM-DD. With the hour below it fixes the sun and the moon; "
+                                  "nothing else in the sky is authored by hand.")
+    hour_utc: float = param(10.0, "Hour (UTC)", min=0.0, max=24.0, unit="h",
+                            tooltip="Time of day, in UTC. Scrub this and the sun, the moon, the "
+                                    "sky colour and the shadows all move together.")
+    advance_clock: bool = param(False, "Advance the clock",
+                                tooltip="Let time pass as the app ticks, scaled by general.time_scale. "
+                                        "Off holds the sky at the hour above.")
+    turbidity: float = param(2.8, "Turbidity", min=1.8, max=10.0,
+                             tooltip="Linke turbidity: 2 is a very clear day, 6 is hazy, 10 is "
+                                     "industrial murk. Drives the sky's colour and its brightness.")
+    ground_albedo: Vec3 = param((0.16, 0.17, 0.12), "Ground albedo", min=0.0, max=1.0,
+                                widget="color", advanced=True)
+    exposure_scale: float = param(1.0, "Exposure", min=0.05, max=20.0, log_scale=True,
+                                  tooltip="Multiplies the dome and both lights together, so the "
+                                          "relative brightness of sky, sun and moon is preserved.")
+    sun_enabled: bool = param(True, "Sun light")
+    moon_enabled: bool = param(True, "Moon light",
+                               tooltip="The only thing that lights an outdoor night scene.")
+    star_intensity: float = param(1.0, "Starlight", min=0.0, max=10.0, advanced=True,
+                                  tooltip="Scales the moonless night floor. Real starlight is "
+                                          "about 0.002 lux, a hundredth of a full moon.")
+    dome_resolution: int = param(1024, "Dome resolution", min=128, max=4096, advanced=True,
+                                 tooltip="Rows in the latitude-longitude environment map. A "
+                                         "marched cloud crosses from clear to opaque inside one "
+                                         "texel, so too few rows draw a staircase along every edge.")
+
+
+@dataclass
+class CloudParams:
+    """The cloud field. One parameterisation, read by every band that looks up."""
+
+    enabled: bool = param(False, "Enabled")
+    cover: float = param(0.35, "Sky cover", min=0.0, max=1.0,
+                         tooltip="Fraction of the sky the cloud hides. This is solved for, not "
+                                 "approximated: ask for 0.45 and the field measures 0.45.")
+    genus: str = param("cumulus", "Cloud type",
+                       choices=("cumulus", "congestus", "stratocumulus", "stratus", "cirrus"),
+                       tooltip="Sets the vertical shape, the thickness and the optical depth. "
+                               "A stratus is a sheet; a cumulus has a flat base and a "
+                               "cauliflower top; cirrus is thin and streaked along the wind.")
+    base_m: float = param(0.0, "Base height", min=0.0, max=12000.0, unit="m",
+                          tooltip="0 computes it from the temperature and dew point below, which "
+                                  "is why a whole field of cumulus has its bases on one level.")
+    temperature_c: float = param(22.0, "Surface temperature", min=-40.0, max=50.0, unit="degC",
+                                 advanced=True)
+    dewpoint_c: float = param(12.0, "Surface dew point", min=-50.0, max=40.0, unit="degC",
+                              advanced=True,
+                              tooltip="The spread against the temperature sets the cloud base: "
+                                      "125 m per kelvin.")
+    thickness_m: float = param(0.0, "Thickness", min=0.0, max=14000.0, unit="m", advanced=True,
+                               tooltip="0 uses the genus default.")
+    optical_depth: float = param(0.0, "Optical depth", min=0.0, max=120.0, advanced=True,
+                                 tooltip="Visible optical depth of the median cloudy column. "
+                                         "0 uses the genus default.")
+    feature_m: float = param(400.0, "Feature size", min=80.0, max=4000.0, unit="m", advanced=True,
+                             tooltip="Diameter of the smallest structure the field carries. 400 m "
+                                     "is the low end of the observed fair-weather cumulus mode.")
+    cells: int = param(256, "Grid cells", min=32, max=512, advanced=True)
+    levels: int = param(48, "Grid levels", min=8, max=128, advanced=True)
+    cell_m: float = param(60.0, "Cell size", min=10.0, max=400.0, unit="m", advanced=True,
+                          tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
+                                  "the field tiles exactly, so there is no edge to reach.")
+    seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+
+
+@dataclass
 class LightingParams:
     enabled: bool = param(False, "Enabled", tooltip="Scale scene light intensities for an overcast look.")
     light_scale: float = param(1.0, "Light scale", min=0.0, max=2.0)
@@ -135,6 +212,8 @@ class LightingParams:
 
 SECTION_TYPES: Dict[str, type] = {
     "general": GeneralParams,
+    "sky": SkyParams,
+    "clouds": CloudParams,
     "fog": FogParams,
     "wind": WindParams,
     "rain": RainParams,
@@ -185,6 +264,8 @@ def coerce_value(f, value):
 @dataclass
 class WeatherState:
     general: GeneralParams = field(default_factory=GeneralParams)
+    sky: SkyParams = field(default_factory=SkyParams)
+    clouds: CloudParams = field(default_factory=CloudParams)
     fog: FogParams = field(default_factory=FogParams)
     wind: WindParams = field(default_factory=WindParams)
     rain: RainParams = field(default_factory=RainParams)
@@ -247,3 +328,13 @@ def _cross_validate(state: WeatherState) -> None:
         snow.flake_max_diameter_mm = snow.flake_min_diameter_mm
     if state.fog.end_distance_m <= state.fog.start_distance_m:
         state.fog.end_distance_m = state.fog.start_distance_m + 1.0
+    # A cloud base above its own top is not a cloud. Both are free parameters and a UI lets you
+    # drag them past each other, so the pair is fixed here rather than refused.
+    clouds = state.clouds
+    if clouds.thickness_m > 0.0 and clouds.base_m > 0.0:
+        ceiling = 20000.0 - clouds.thickness_m
+        if clouds.base_m > ceiling:
+            clouds.base_m = max(ceiling, 0.0)
+    # The hour is a wall-clock hour and 24:00 is the next day's 00:00, not a 25th hour.
+    if state.sky.hour_utc >= 24.0:
+        state.sky.hour_utc = state.sky.hour_utc % 24.0

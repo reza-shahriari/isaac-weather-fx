@@ -13,6 +13,7 @@ parser.add_argument("--headless", action="store_true")
 parser.add_argument("--manual", action="store_true", help="deterministic stepping with wx.step(dt)")
 parser.add_argument("--multi-gpu", action="store_true",
                     help="render on every GPU (fails with Vulkan import errors on mixed GPU models)")
+parser.add_argument("--sky", default="auto", help="'auto' (Isaac Sim HDR sky), 'none', or an HDR path/URL")
 args, _ = parser.parse_known_args()
 
 from isaacsim import SimulationApp  # noqa: E402
@@ -21,7 +22,6 @@ simulation_app = SimulationApp({"headless": args.headless, "multi_gpu": args.mul
 
 import omni.kit.app  # noqa: E402
 import omni.usd  # noqa: E402
-from pxr import Gf, UsdGeom, UsdLux  # noqa: E402
 
 EXT_FOLDER = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "exts"))
 
@@ -36,35 +36,23 @@ except Exception as exc:  # Option B: just import the package (API only, no UI)
 
 from weather_fx import api as weather  # noqa: E402
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from demo_scene import CAMERA_PATH, build_scene  # noqa: E402
+
 # ---------------------------------------------------------------- scene
 omni.usd.get_context().new_stage()
 stage = omni.usd.get_context().get_stage()
-UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
-UsdGeom.SetStageMetersPerUnit(stage, 1.0)
-
-ground = UsdGeom.Cube.Define(stage, "/World/Ground")
-ground.AddScaleOp().Set(Gf.Vec3f(50, 50, 0.05))
-for i, x in enumerate(range(5, 105, 20)):  # boxes at increasing distance to show fog falloff
-    box = UsdGeom.Cube.Define(stage, f"/World/Box_{i}")
-    box.AddTranslateOp().Set(Gf.Vec3d(x, 0, 1))
-    box.GetDisplayColorAttr().Set([Gf.Vec3f(0.8, 0.2, 0.1)])
-light = UsdLux.DistantLight.Define(stage, "/World/Sun")
-light.CreateIntensityAttr(3000)
-UsdGeom.Xformable(light).AddRotateXYZOp().Set(Gf.Vec3f(-45, 0, 30))
-
-camera = UsdGeom.Camera.Define(stage, "/World/Camera")
-UsdGeom.XformCommonAPI(camera).SetTranslate(Gf.Vec3d(-8, 0, 2))
-UsdGeom.XformCommonAPI(camera).SetRotate(Gf.Vec3f(90, 0, -90))
+build_scene(stage, sky=args.sky)
 try:
     from omni.kit.viewport.utility import get_active_viewport
 
-    get_active_viewport().camera_path = "/World/Camera"
+    get_active_viewport().camera_path = CAMERA_PATH
 except Exception:
     pass
 
 # ---------------------------------------------------------------- weather
 wx = weather.get_controller()
-wx.follow("/World/Camera")
+wx.follow(CAMERA_PATH)
 if args.manual:
     wx.set_general(time_source="manual", seed=42)
 

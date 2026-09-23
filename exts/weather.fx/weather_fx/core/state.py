@@ -81,7 +81,14 @@ class PrecipitationParams:
     volume_height_m: float = param(10.0, "Volume height", min=2.0, max=100.0, unit="m")
     max_particles: int = param(30000, "Max particles", min=0, max=200000, advanced=True)
     color: Vec3 = param((0.80, 0.85, 0.90), "Color", min=0.0, max=1.0, widget="color")
-    opacity: float = param(0.35, "Opacity", min=0.0, max=1.0)
+    opacity: float = param(0.35, "Opacity", min=0.0, max=1.0,
+                           tooltip="Ignored by RTX Real-Time unless partial opacity is enabled in the renderer.")
+    self_illumination: float = param(0.5, "Self-illumination", min=0.0, max=4.0,
+                                     tooltip="Emission as a fraction of the color. Stands in for the sky light "
+                                             "drops and flakes scatter toward the camera.")
+    near_clearance_m: float = param(1.0, "Near clearance", min=0.0, max=5.0, unit="m",
+                                    tooltip="Hide particles closer than this to the followed camera. "
+                                            "A real lens defocuses them; rendered sharp they fill the frame.")
     material: str = param("preview", "Material", choices=("preview", "glass"), advanced=True,
                           tooltip="preview: UsdPreviewSurface (fast). glass: OmniGlass MDL.")
     cast_shadows: bool = param(False, "Cast shadows", advanced=True)
@@ -89,8 +96,12 @@ class PrecipitationParams:
 
 @dataclass
 class RainParams(PrecipitationParams):
+    volume_radius_m: float = param(8.0, "Volume half-width", min=2.0, max=100.0, unit="m",
+                                   tooltip="Half size of the particle box that follows the camera. "
+                                           "Drops beyond ~10 m are thinner than a pixel, so a small box "
+                                           "puts the particle budget where it shows.")
     rate_mm_h: float = param(10.0, "Rain rate", min=0.1, max=150.0, unit="mm/h", log_scale=True)
-    density_scale: float = param(1e-3, "Density scale", min=1e-5, max=1.0, log_scale=True,
+    density_scale: float = param(4e-3, "Density scale", min=1e-5, max=1.0, log_scale=True,
                                  tooltip="Physical drop counts are millions per scene; this thins them "
                                          "to a renderable number. Visual control, not physics.")
     drop_min_diameter_mm: float = param(0.5, "Min drop diameter", min=0.1, max=3.0, unit="mm", advanced=True)
@@ -98,13 +109,14 @@ class RainParams(PrecipitationParams):
     streak_exposure_s: float = param(1.0 / 60.0, "Streak exposure", min=0.0005, max=0.1, unit="s",
                                      log_scale=True,
                                      tooltip="Camera exposure time. Streak length = drop speed x exposure.")
-    streak_width_scale: float = param(1.0, "Streak width scale", min=0.1, max=10.0)
+    streak_width_scale: float = param(2.0, "Streak width scale", min=0.1, max=10.0)
 
 
 @dataclass
 class SnowParams(PrecipitationParams):
     color: Vec3 = param((0.95, 0.96, 1.0), "Color", min=0.0, max=1.0, widget="color")
     opacity: float = param(0.9, "Opacity", min=0.0, max=1.0)
+    self_illumination: float = param(0.3, "Self-illumination", min=0.0, max=4.0)
     number_density_m3: float = param(2.0, "Flake density", min=0.01, max=200.0, unit="1/m^3", log_scale=True)
     flake_min_diameter_mm: float = param(1.0, "Min flake diameter", min=0.2, max=10.0, unit="mm", advanced=True)
     flake_max_diameter_mm: float = param(6.0, "Max flake diameter", min=1.0, max=30.0, unit="mm", advanced=True)

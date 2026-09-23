@@ -26,7 +26,7 @@ log = logging.getLogger("weather_fx")
 # Params that change the per-particle distribution (require resampling).
 _RAIN_SAMPLER_KEYS = ("rate_mm_h", "drop_min_diameter_mm", "drop_max_diameter_mm")
 _SNOW_SAMPLER_KEYS = ("flake_min_diameter_mm", "flake_max_diameter_mm", "fall_speed_mps", "fall_speed_jitter")
-_MATERIAL_KEYS = ("color", "opacity", "material", "cast_shadows")
+_MATERIAL_KEYS = ("color", "opacity", "self_illumination", "material", "cast_shadows")
 
 
 class PrecipitationEffect(Effect):
@@ -48,6 +48,8 @@ class PrecipitationEffect(Effect):
         self._active = False
         self._last_quat = None
         self._last_scale_key = None
+        self._base_scales = None
+        self._hid_near = False
         self._physical_density = 0.0
 
     # ------------------------------------------------------------------ helpers
@@ -114,6 +116,8 @@ class PrecipitationEffect(Effect):
         self._field = ParticleField(up_axis=up, seed=seed)
         self._last_quat = None
         self._last_scale_key = None
+        self._base_scales = None
+        self._hid_near = False
 
     def _update_material(self, p):
         from pxr import Gf, Sdf, Usd, UsdShade
@@ -135,7 +139,10 @@ class PrecipitationEffect(Effect):
                     mat.CreateDisplacementOutput("mdl").ConnectToSource(out)
                 else:
                     shader.CreateIdAttr("UsdPreviewSurface")
-                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(0.15)
+                    # No specular: grazing reflections on thin streaks render as dark hairlines.
+                    shader.CreateInput("roughness", Sdf.ValueTypeNames.Float).Set(1.0)
+                    shader.CreateInput("useSpecularWorkflow", Sdf.ValueTypeNames.Int).Set(1)
+                    shader.CreateInput("specularColor", Sdf.ValueTypeNames.Color3f).Set(Gf.Vec3f(0.0))
                     out = shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
                     mat.CreateSurfaceOutput().ConnectToSource(out)
                 UsdShade.MaterialBindingAPI.Apply(self._proto.GetPrim()).Bind(mat)
@@ -148,6 +155,9 @@ class PrecipitationEffect(Effect):
             else:
                 self._shader.CreateInput("diffuseColor", Sdf.ValueTypeNames.Color3f).Set(color)
                 self._shader.CreateInput("opacity", Sdf.ValueTypeNames.Float).Set(float(p.opacity))
+                # Drops and flakes scatter sky light toward the camera; approximate it as emission.
+                glow = Gf.Vec3f(*(c * p.self_illumination for c in p.color))
+                self._shader.CreateInput("emissiveColor", Sdf.ValueTypeNames.Color3f).Set(glow)
             for prim in (self._instancer.GetPrim(), self._proto.GetPrim()):
                 prim.CreateAttribute("primvars:doNotCastShadows", Sdf.ValueTypeNames.Bool).Set(not p.cast_shadows)
 
@@ -161,7 +171,28 @@ class PrecipitationEffect(Effect):
             img = UsdGeom.Imageable(self._instancer.GetPrim())
             img.MakeVisible() if visible else img.MakeInvisible()
 
-    def _write(self, wind_mps, full):
+    def _base_scales_changed(self, wind_mps, full, mpu):
+        """Recompute per-particle scales when their inputs change. Returns True if they did."""
+        field, p = self._field, self._params
+        d_units = field.attrs["diameter_m"] / mpu
+        if self.kind == "snow":
+            if full or self._base_scales is None:
+                self._base_scales = np.repeat(d_units[:, None], 3, axis=1).astype(np.float32)
+                return True
+            return False
+        # Rain: streak aligned with the mean velocity, length = speed * exposure.
+        scale_key = (round(float(np.linalg.norm(wind_mps)), 2), p.streak_exposure_s, p.streak_width_scale)
+        if not full and scale_key == self._last_scale_key and self._base_scales is not None:
+            return False
+        fall = field.attrs["fall_speed_mps"]
+        speed = np.sqrt(fall ** 2 + float(np.dot(wind_mps, wind_mps)))
+        scales = np.repeat((d_units * p.streak_width_scale)[:, None], 3, axis=1)
+        scales[:, field.up_axis] = np.maximum(speed * p.streak_exposure_s / mpu, d_units)
+        self._base_scales = scales.astype(np.float32)
+        self._last_scale_key = scale_key
+        return True
+
+    def _write(self, wind_mps, full, anchor=None):
         from pxr import Gf, Usd, Vt
 
         stage, inst, field, p = self._stage, self._instancer, self._field, self._params
@@ -172,27 +203,28 @@ class PrecipitationEffect(Effect):
                 inst.GetProtoIndicesAttr().Set(Vt.IntArray.FromNumpy(np.zeros(n, dtype=np.int32)))
             inst.GetPositionsAttr().Set(Vt.Vec3fArray.FromNumpy(field.positions.astype(np.float32)))
 
-            d_units = field.attrs["diameter_m"] / mpu
+            write_scales = self._base_scales_changed(wind_mps, full, mpu)
+            scales = self._base_scales
+            # Hide particles right in front of the lens: a real camera defocuses them away,
+            # rendered sharp they become huge bars across the image.
+            clearance = p.near_clearance_m / mpu
+            if clearance > 0.0 and anchor is not None and n:
+                near = np.einsum("ij,ij->i", field.positions - anchor, field.positions - anchor) < clearance ** 2
+                if near.any() or self._hid_near:
+                    scales = scales.copy()
+                    scales[near] = 0.0
+                    write_scales = True
+                self._hid_near = bool(near.any())
+            if write_scales:
+                inst.GetScalesAttr().Set(Vt.Vec3fArray.FromNumpy(scales))
             if self.kind == "snow":
-                if full:
-                    scales = np.repeat(d_units[:, None], 3, axis=1)
-                    inst.GetScalesAttr().Set(Vt.Vec3fArray.FromNumpy(scales.astype(np.float32)))
                 return
 
-            # Rain: streak aligned with the mean velocity, length = speed * exposure.
-            up = field.up_axis
             up_vec = np.zeros(3)
-            up_vec[up] = 1.0
+            up_vec[field.up_axis] = 1.0
             fall = field.attrs["fall_speed_mps"]
             mean_vel = wind_mps - up_vec * (float(fall.mean()) if n else 7.0)
             quat = rotation_between(up_vec, -mean_vel)
-            scale_key = (round(float(np.linalg.norm(wind_mps)), 2), p.streak_exposure_s, p.streak_width_scale)
-            if full or scale_key != self._last_scale_key:
-                speed = np.sqrt(fall ** 2 + float(np.dot(wind_mps, wind_mps)))
-                scales = np.repeat((d_units * p.streak_width_scale)[:, None], 3, axis=1)
-                scales[:, up] = np.maximum(speed * p.streak_exposure_s / mpu, d_units)
-                inst.GetScalesAttr().Set(Vt.Vec3fArray.FromNumpy(scales.astype(np.float32)))
-                self._last_scale_key = scale_key
             if full or self._last_quat is None or _quat_angle(quat, self._last_quat) > math.radians(0.5):
                 # Fabric rejects half quaternions ("Unsupported type during VtValue extraction"),
                 # so use the float orientationsf attribute (USD 23.11+) when available.
@@ -244,7 +276,7 @@ class PrecipitationEffect(Effect):
         self._field.wrap(anchor, half)
 
         self._active = True
-        self._write(self._wind(state, self.context.time), full=True)
+        self._write(self._wind(state, self.context.time), full=True, anchor=anchor)
         self._set_visible(True)
 
     def _wind(self, state, t):
@@ -267,9 +299,10 @@ class PrecipitationEffect(Effect):
         wind = self._wind(state, t)
         sway_amp = getattr(p, "sway_amplitude_m", 0.0)
         sway_freq = getattr(p, "sway_frequency_hz", 0.0)
-        self._field.step(dt, self.context.anchor(), self._half_extents(p, mpu), wind, t,
+        anchor = self.context.anchor()
+        self._field.step(dt, anchor, self._half_extents(p, mpu), wind, t,
                          velocity_scale=1.0 / mpu, sway_amplitude=sway_amp, sway_frequency=sway_freq)
-        self._write(wind, full=False)
+        self._write(wind, full=False, anchor=anchor)
 
     def detach(self):
         self._active = False

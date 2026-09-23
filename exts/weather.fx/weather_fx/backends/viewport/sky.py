@@ -39,7 +39,13 @@ from typing import Any, Optional, Set
 
 import numpy as np
 
-from ...core.sky import SkyConditions, conditions_from_state, environment_map
+from ...core.celestial import civil_twilight_fraction
+from ...core.sky import (
+    SkyConditions,
+    conditions_from_state,
+    environment_map,
+    latlong_directions,
+)
 from ..base import Effect
 
 log = logging.getLogger("weather_fx")
@@ -57,6 +63,13 @@ SOLAR_CONSTANT_W_M2 = 1361.0
 #: Broadband atmospheric transmittance at the zenith on a clear day. The airmass law is applied
 #: on top; this is the anchor.
 CLEAR_SKY_TRANSMITTANCE = 0.75
+
+#: Renderer-side level the *median daylight sky* is exposed to, in the units an RTX dome light's
+#: `intensity` multiplies its texture by. **Measured** by sweeping the intensity on a demo stage:
+#: intensity x median-sky-luminance near 100 renders the sky as mid-grey, near 400 it begins to
+#: wash out, and 10 is deep twilight. 300 puts a clear daytime sky where a camera's own
+#: auto-exposure would put it.
+DOME_EXPOSURE_TARGET = 300.0
 
 
 def _direct_normal_irradiance(elevation_deg: float, turbidity: float) -> float:
@@ -189,8 +202,17 @@ class SkyEffect(Effect):
         # The dome's *intensity* carries the exposure and the texture stays in honest cd/m2. The
         # sky's absolute level moves by six decades between noon and a moonless night, and no
         # fixed intensity survives that: one end of the day is blown out and the other is black.
-        median = float(np.median(image[image > 0.0])) if np.any(image > 0.0) else 1.0
-        self._exposure = float(np.clip(1000.0 / max(median, 1e-9), 1e-4, 1e9))
+        #
+        # Two details, both of which cost a washed-out frame when they are missing. The median is
+        # taken over the sky **only** -- the ground half of a lat-long map is far darker, and
+        # including it drags the median down and the intensity up. And the twilight fade is
+        # divided back out first, so the reference is the *daylight* sky this scene would have
+        # had: normalising on the median of a moonless sky exposes the night up to look like noon.
+        above = latlong_directions(image.shape[0])[..., 1] > 0.0
+        sky_median = float(np.median(image[above])) if np.any(above) else 1.0
+        daylight = civil_twilight_fraction(self._conditions.sun.elevation_deg)
+        reference = sky_median / max(daylight, 1e-9)
+        self._exposure = float(np.clip(DOME_EXPOSURE_TARGET / max(reference, 1e-9), 1e-6, 1e9))
 
         directory = self._texture_dir or pathlib.Path(tempfile.gettempdir())
         directory.mkdir(parents=True, exist_ok=True)

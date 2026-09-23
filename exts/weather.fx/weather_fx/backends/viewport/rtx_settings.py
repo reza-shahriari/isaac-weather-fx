@@ -9,7 +9,7 @@ FOG_SETTINGS = {
     "enabled": "/rtx/fog/enabled",
     "color": "/rtx/fog/fogColor",
     "color_intensity": "/rtx/fog/fogColorIntensity",
-    "z_up": "/rtx/fog/fogZUpEnabled",
+    "z_up": "/rtx/fog/fogZup/enabled",
     "start_distance": "/rtx/fog/fogStartDist",
     "end_distance": "/rtx/fog/fogEndDist",
     "distance_density": "/rtx/fog/fogDistanceDensity",

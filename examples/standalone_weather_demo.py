@@ -11,11 +11,13 @@ import sys
 parser = argparse.ArgumentParser()
 parser.add_argument("--headless", action="store_true")
 parser.add_argument("--manual", action="store_true", help="deterministic stepping with wx.step(dt)")
+parser.add_argument("--multi-gpu", action="store_true",
+                    help="render on every GPU (fails with Vulkan import errors on mixed GPU models)")
 args, _ = parser.parse_known_args()
 
 from isaacsim import SimulationApp  # noqa: E402
 
-simulation_app = SimulationApp({"headless": args.headless})
+simulation_app = SimulationApp({"headless": args.headless, "multi_gpu": args.multi_gpu})
 
 import omni.kit.app  # noqa: E402
 import omni.usd  # noqa: E402
@@ -68,14 +70,18 @@ if args.manual:
 
 schedule = [(0, "light_fog"), (200, "heavy_rain"), (500, "storm"), (800, "blizzard"), (1100, "clear")]
 DT = 1.0 / 60.0
-for frame in range(1300):
+CYCLE = 1300
+# Headless: one pass. With a window: repeat the cycle until the window is closed.
+frame = 0
+while simulation_app.is_running() and (frame < CYCLE or not args.headless):
     for start, preset in schedule:
-        if frame == start:
+        if frame % CYCLE == start:
             wx.apply_preset(preset)
             print(f"[demo] frame {frame}: {preset} -> {wx.stats()['viewport']}")
     if args.manual:
         wx.step(DT)
     simulation_app.update()
+    frame += 1
 
 weather.shutdown_controller()
 simulation_app.close()

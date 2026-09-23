@@ -194,8 +194,14 @@ class PrecipitationEffect(Effect):
                 inst.GetScalesAttr().Set(Vt.Vec3fArray.FromNumpy(scales.astype(np.float32)))
                 self._last_scale_key = scale_key
             if full or self._last_quat is None or _quat_angle(quat, self._last_quat) > math.radians(0.5):
-                q = Gf.Quath(quat[0], Gf.Vec3h(quat[1], quat[2], quat[3]))
-                inst.GetOrientationsAttr().Set(Vt.QuathArray([q] * n))
+                # Fabric rejects half quaternions ("Unsupported type during VtValue extraction"),
+                # so use the float orientationsf attribute (USD 23.11+) when available.
+                if hasattr(inst, "CreateOrientationsfAttr"):
+                    q = Gf.Quatf(quat[0], Gf.Vec3f(quat[1], quat[2], quat[3]))
+                    inst.CreateOrientationsfAttr().Set(Vt.QuatfArray([q] * n))
+                else:
+                    q = Gf.Quath(quat[0], Gf.Vec3h(quat[1], quat[2], quat[3]))
+                    inst.GetOrientationsAttr().Set(Vt.QuathArray([q] * n))
                 self._last_quat = quat
 
     # ------------------------------------------------------------------ lifecycle

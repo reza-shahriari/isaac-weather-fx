@@ -37,15 +37,12 @@ import pathlib
 import tempfile
 from typing import Any, Optional, Set
 
-import numpy as np
-
-from ...core.celestial import civil_twilight_fraction
-from ...core.meteorology import clear_sky_irradiance
+from ...core.meteorology import beam_tint, clear_sky_irradiance
 from ...core.sky import (
     SkyConditions,
+    dome_exposure,
     conditions_from_state,
     environment_map,
-    latlong_directions,
 )
 from ..base import Effect
 
@@ -59,12 +56,7 @@ MOON_PATH = f"{SKY_ROOT}/Moon"
 #: Luminous efficacy of daylight, lm/W. Converts the sun's irradiance into the photometric units
 #: a `DistantLight` intensity is quoted in.
 LUMINOUS_EFFICACY_DAYLIGHT = 105.0
-#: Renderer-side level the *median daylight sky* is exposed to, in the units an RTX dome light's
-#: `intensity` multiplies its texture by. **Measured** by sweeping the intensity on a demo stage:
-#: intensity x median-sky-luminance near 100 renders the sky as mid-grey, near 400 it begins to
-#: wash out, and 10 is deep twilight. 300 puts a clear daytime sky where a camera's own
-#: auto-exposure would put it.
-DOME_EXPOSURE_TARGET = 300.0
+
 
 
 class SkyEffect(Effect):
@@ -79,7 +71,7 @@ class SkyEffect(Effect):
                  "ground_albedo", "star_intensity", "dome_resolution")),
         ("clouds", ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c",
                     "thickness_m", "optical_depth", "feature_m", "cells", "levels", "cell_m",
-                    "seed")),
+                    "seed", "march_steps")),
     )
 
     def __init__(self, texture_dir: Optional[str] = None):
@@ -106,7 +98,7 @@ class SkyEffect(Effect):
         rebake = key != self._baked_key or self._texture_path is None
         if rebake:
             self._conditions = conditions_from_state(state)
-            self._bake(state)
+            self._bake(state, key)
             self._baked_key = key
         assert self._conditions is not None
         self._author(stage, state, self._conditions)
@@ -170,7 +162,7 @@ class SkyEffect(Effect):
             parts.extend(f"{section}.{n}={getattr(block, n)!r}" for n in names)
         return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
-    def _bake(self, state: Any) -> None:
+    def _bake(self, state: Any, key: str = "") -> None:
         from ...core.exr import write_exr
 
         assert self._conditions is not None
@@ -178,26 +170,34 @@ class SkyEffect(Effect):
         image = environment_map(self._conditions, height=height)
 
         # The dome's *intensity* carries the exposure and the texture stays in honest cd/m2. The
-        # sky's absolute level moves by six decades between noon and a moonless night, and no
+        # sky's absolute level moves by seven decades between noon and a moonless night, and no
         # fixed intensity survives that: one end of the day is blown out and the other is black.
-        #
-        # Two details, both of which cost a washed-out frame when they are missing. The median is
-        # taken over the sky **only** -- the ground half of a lat-long map is far darker, and
-        # including it drags the median down and the intensity up. And the twilight fade is
-        # divided back out first, so the reference is the *daylight* sky this scene would have
-        # had: normalising on the median of a moonless sky exposes the night up to look like noon.
-        above = latlong_directions(image.shape[0])[..., 1] > 0.0
-        sky_median = float(np.median(image[above])) if np.any(above) else 1.0
-        daylight = civil_twilight_fraction(self._conditions.sun.elevation_deg)
-        reference = sky_median / max(daylight, 1e-9)
-        self._exposure = float(np.clip(DOME_EXPOSURE_TARGET / max(reference, 1e-9), 1e-6, 1e9))
+        # The rule lives in `core.sky.dome_exposure` so it can be tested without a renderer.
+        self._exposure = dome_exposure(image)
 
         directory = self._texture_dir or pathlib.Path(tempfile.gettempdir())
         directory.mkdir(parents=True, exist_ok=True)
-        # Per process: a shared machine runs more than one of these at a time.
-        path = directory / f"weather_fx_sky_{os.getpid()}.exr"
+        # **One file per bake, not one per process.** Writing every sky to the same path looks
+        # tidy and breaks two ways at once: the renderer caches a texture by its path, so the
+        # second sky of a session is served the first one's pixels, and overwriting a file the
+        # loader may still be reading produces "Unexpected data block y coordinate" from
+        # OpenEXR -- a half-written file, read as a whole one. Both were live until this was
+        # measured: a scenario sweep rendered thirteen different skies as one.
+        #
+        # The pid keeps two processes on a shared machine apart; the bake key keeps two skies
+        # within one process apart, and makes the name reproducible for the same conditions.
+        previous = self._texture_path
+        digest = key or self._bake_key(state)
+        path = directory / f"weather_fx_sky_{os.getpid()}_{digest[:12]}.exr"
         write_exr(path, image)
         self._texture_path = path
+        if previous is not None and previous != path:
+            # The renderer may still hold the old one; a failure to remove it is not worth a
+            # broken sky, and a temp file is the operating system's problem after that.
+            try:
+                previous.unlink()
+            except OSError:
+                log.debug("weather_fx: could not remove the previous sky texture %s", previous)
 
     # --- authoring -----------------------------------------------------------------------
 
@@ -208,6 +208,20 @@ class SkyEffect(Effect):
         sky = state.sky
         scale = float(sky.exposure_scale)
 
+        # The beam's colour, split into a light colour (peak-normalised, because a `UsdLux` colour
+        # is a multiplier and a channel above one is a surprise waiting in somebody's shader) and
+        # the factor that puts back what the normalisation took. The product is unchanged, so the
+        # light is exactly as bright as the irradiance says and exactly as orange as the airmass
+        # says. Without this a scene at a four-degree sun is merely dim, which is the one thing a
+        # sunset is not.
+        sun_tint = beam_tint(conditions.sun.elevation_deg, conditions.turbidity)
+        sun_peak = max(sun_tint) or 1.0
+        moon_tint = tuple(
+            a * b for a, b in zip(beam_tint(conditions.moon.elevation_deg, conditions.turbidity),
+                                  (0.84, 0.90, 1.0))
+        )
+        moon_peak = max(moon_tint) or 1.0
+
         with Usd.EditContext(stage, stage.GetSessionLayer()):
             stage.DefinePrim("/WeatherFX", "Xform")
             stage.DefinePrim(SKY_ROOT, "Xform")
@@ -217,6 +231,12 @@ class SkyEffect(Effect):
                 dome.CreateTextureFileAttr().Set(Sdf.AssetPath(str(self._texture_path)))
                 dome.CreateTextureFormatAttr().Set(UsdLux.Tokens.latlong)
             dome.CreateIntensityAttr(self._exposure * scale)
+            # The sun and the moon are exposed by the *same* factor as the dome below. They are
+            # quoted in lux and the dome's texture in cd/m2, so leaving the lights unexposed puts
+            # the sun some two and a half decades above the sky it shares a frame with: the sky
+            # renders correctly and every surface the sun touches clips to white. A sunlit 0.19
+            # albedo ground and a clear zenith belong within a stop of each other, which is what
+            # one exposure gives and two cannot.
             # RTX hides a dome from primary rays unless told otherwise, which gives a black
             # background lit by a sky nobody can see -- the exact failure this module fixes.
             dome.GetPrim().CreateAttribute(
@@ -238,9 +258,11 @@ class SkyEffect(Effect):
                     )
                     * LUMINOUS_EFFICACY_DAYLIGHT
                     * conditions.daylight
+                    * self._exposure
                     * scale
+                    * sun_peak
                 ),
-                colour=(1.0, 0.985, 0.95),
+                colour=tuple(c / sun_peak for c in sun_tint),
             )
             self._author_body(
                 stage,
@@ -252,9 +274,11 @@ class SkyEffect(Effect):
                 intensity=(
                     conditions.moon_lux
                     / max(math.sin(math.radians(max(conditions.moon.elevation_deg, 1.0))), 1e-3)
+                    * self._exposure
                     * scale
+                    * moon_peak
                 ),
-                colour=(0.84, 0.90, 1.0),
+                colour=tuple(c / moon_peak for c in moon_tint),
             )
 
     @staticmethod

@@ -281,3 +281,86 @@ def test_a_fixed_site_and_year_are_honoured() -> None:
     assert o["sky"]["latitude_deg"] == pytest.approx(51.5)
     assert o["sky"]["longitude_deg"] == pytest.approx(-0.13)
     assert date.fromisoformat(o["sky"]["date_utc"]).year == 2023
+
+
+# --- exposure ------------------------------------------------------------------------------------
+
+
+def _sky_at(hour, *, cover=0.0, turbidity=2.6, date="2024-06-21", height=128, seed=17):
+    from weather_fx.core.sky import conditions_from_state, environment_map
+    from weather_fx.core.state import WeatherState
+
+    state = WeatherState().with_updates(
+        "sky", latitude_deg=48.14, longitude_deg=11.58, date_utc=date,
+        hour_utc=hour, turbidity=turbidity,
+    )
+    state = state.with_updates(
+        "clouds", enabled=cover > 0.0, cover=cover, genus="cumulus",
+        temperature_c=22.0, dewpoint_c=12.0, seed=seed, cells=64, cell_m=140.0, levels=24,
+    )
+    return environment_map(conditions_from_state(state), height=height)
+
+
+def test_a_clear_midday_sky_is_exposed_where_the_measurement_put_it():
+    """The anchor. A clear day's 99th percentile lands on the target by construction, and its
+    median lands near 300 -- the value the intensity sweep on a demo stage actually produced."""
+    from weather_fx.core.sky import DOME_HIGHLIGHT_TARGET, dome_exposure, latlong_directions
+
+    image = _sky_at(12.97, turbidity=2.1)
+    exposure = dome_exposure(image)
+    luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
+    assert float(np.percentile(luminance, 99.0)) * exposure == pytest.approx(
+        DOME_HIGHLIGHT_TARGET, rel=0.02
+    )
+    assert 200.0 < float(np.median(luminance)) * exposure < 420.0
+
+
+def test_a_sunset_does_not_clip_the_way_a_median_meter_made_it():
+    """The defect this rule replaced. Metering on the median put a 4 degree sun's highlights 2.4x
+    above where noon puts them, so the entire solar half of the frame rendered white."""
+    from weather_fx.core.sky import dome_exposure, latlong_directions
+
+    noon, sunset = _sky_at(12.97, cover=0.35), _sky_at(18.73, cover=0.35, turbidity=3.6)
+    peaks = []
+    for image in (noon, sunset):
+        luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
+        peaks.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image))
+    assert peaks[1] < 1.15 * peaks[0]
+
+
+def test_civil_twilight_does_not_run_the_exposure_to_its_clamp():
+    """The other direction, and the uglier one: the median of the upper hemisphere at a -9 degree
+    sun is zero to float precision, so a median meter divided by nothing and returned a white
+    frame at the darkest moment of the day."""
+    from weather_fx.core.sky import dome_exposure, latlong_directions
+
+    image = _sky_at(20.5, cover=0.3, turbidity=3.0)
+    luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
+    peak = float(np.percentile(luminance, 99.0))
+    # The trap is real: half the sky is unlit, so the median is five orders below the highlights.
+    assert float(np.median(luminance)) < 1e-5 * peak
+    rendered = peak * dome_exposure(image)
+    assert 50.0 < rendered < 450.0
+
+
+def test_the_day_stays_brighter_than_the_night_by_a_legible_margin():
+    """An adaptation, not a normalisation. Seven decades of physical luminance are compressed,
+    but the order and a readable gap have to survive or the gallery is a set of grey squares."""
+    from weather_fx.core.sky import dome_exposure, latlong_directions
+
+    rendered = []
+    for hour, cover, date in ((12.97, 0.35, "2024-06-21"), (18.73, 0.35, "2024-06-21"),
+                              (20.5, 0.3, "2024-06-21"), (0.83, 0.25, "2024-07-23")):
+        image = _sky_at(hour, cover=cover, date=date)
+        luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
+        rendered.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image))
+    assert all(a > b for a, b in zip(rendered, rendered[1:])), rendered
+    assert rendered[0] / rendered[-1] > 4.0     # night is clearly night
+    assert rendered[0] / rendered[-1] < 100.0   # and not simply black
+
+
+def test_an_all_black_sky_does_not_divide_by_it():
+    from weather_fx.core.sky import dome_exposure
+
+    exposure = dome_exposure(np.zeros((32, 64, 3), dtype=np.float32))
+    assert np.isfinite(exposure) and exposure > 0.0

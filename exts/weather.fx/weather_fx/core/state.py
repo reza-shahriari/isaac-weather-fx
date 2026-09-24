@@ -201,6 +201,12 @@ class CloudParams:
                           tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
                                   "the field tiles exactly, so there is no edge to reach.")
     seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+    march_steps: int = param(
+        64, "March steps", min=16, max=512, advanced=True,
+        tooltip="Samples per ray when the dome is baked. 64 is right for a viewport; a still "
+                "someone will look at closely wants more, because the step pattern is visible "
+                "on a backlit cloud edge before anything else is.",
+    )
 
 
 @dataclass

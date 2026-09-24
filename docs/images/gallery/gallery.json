@@ -1,0 +1,1744 @@
+[
+  {
+    "scenario": "clear_noon",
+    "caption": "Clear, high summer sun. Rayleigh gradient from a deep zenith to a pale horizon.",
+    "conditions": "2024-06-21 12:58 UTC  sun +58.0 deg el / 228 deg az  moon -57.7 deg, full (100 %)  turbidity 2.1  no cloud field built",
+    "sun_elevation_deg": 58.05,
+    "moon_elevation_deg": -57.73,
+    "moon_illuminated": 0.995,
+    "turbidity": 2.1,
+    "cloud_cover": null,
+    "surface_weather": "2024-06-20 12:58 UTC + 24 h, 25 samples  air 12.0 .. 22.1 degC  RH 53 .. 100 %  peak DNI 964 W/m2  cloud 0 %  visibility 36.6 km",
+    "images": [
+      "captures/gallery/clear_noon_sky.png",
+      "captures/gallery/clear_noon_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 12.966666666666667,
+        "advance_clock": false,
+        "turbidity": 2.1,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": false,
+        "cover": 0.35,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 22.0,
+        "dewpoint_c": 12.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 256,
+        "levels": 48,
+        "cell_m": 60.0,
+        "seed": 0,
+        "march_steps": 64
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "fair_cumulus",
+    "caption": "Fair-weather cumulus, 28 % cover, bases on one level at the condensation height.",
+    "conditions": "2024-06-21 13:56 UTC  sun +49.9 deg el / 246 deg az  moon -49.0 deg, full (100 %)  turbidity 2.6  cloud 20 % cumulus",
+    "sun_elevation_deg": 49.88,
+    "moon_elevation_deg": -48.98,
+    "moon_illuminated": 0.996,
+    "turbidity": 2.6,
+    "cloud_cover": 0.2,
+    "surface_weather": "2024-06-20 13:56 UTC + 24 h, 25 samples  air 14.4 .. 24.0 degC  RH 44 .. 80 %  peak DNI 755 W/m2  cloud 20 %  visibility 29.6 km",
+    "images": [
+      "captures/gallery/fair_cumulus_sky.png",
+      "captures/gallery/fair_cumulus_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 13.933333333333334,
+        "advance_clock": false,
+        "turbidity": 2.6,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.2,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 24.0,
+        "dewpoint_c": 11.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 3,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "broken_cumulus",
+    "caption": "Broken cumulus, 55 % cover and a deeper deck \u2014 lit sides bright, bases grey.",
+    "conditions": "2024-06-21 14:46 UTC  sun +41.9 deg el / 258 deg az  moon -41.1 deg, full (100 %)  turbidity 3.0  cloud 38 % cumulus",
+    "sun_elevation_deg": 41.94,
+    "moon_elevation_deg": -41.05,
+    "moon_illuminated": 0.996,
+    "turbidity": 3.0,
+    "cloud_cover": 0.38,
+    "surface_weather": "2024-06-20 14:46 UTC + 24 h, 25 samples  air 17.9 .. 26.2 degC  RH 50 .. 83 %  peak DNI 574 W/m2  cloud 38 %  visibility 25.0 km",
+    "images": [
+      "captures/gallery/broken_cumulus_sky.png",
+      "captures/gallery/broken_cumulus_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 14.766666666666667,
+        "advance_clock": false,
+        "turbidity": 3.0,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.38,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 26.0,
+        "dewpoint_c": 15.0,
+        "thickness_m": 0.0,
+        "optical_depth": 26.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 11,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "towering_congestus",
+    "caption": "Congestus: the same field given height, so the towers shade their own bases.",
+    "conditions": "2024-06-21 15:34 UTC  sun +34.0 deg el / 268 deg az  moon -33.4 deg, full (100 %)  turbidity 3.2  cloud 32 % congestus",
+    "sun_elevation_deg": 34.01,
+    "moon_elevation_deg": -33.39,
+    "moon_illuminated": 0.996,
+    "turbidity": 3.2,
+    "cloud_cover": 0.32,
+    "surface_weather": "2024-06-20 15:34 UTC + 24 h, 25 samples  air 19.8 .. 28.5 degC  RH 56 .. 95 %  peak DNI 625 W/m2  cloud 32 %  visibility 23.0 km",
+    "images": [
+      "captures/gallery/towering_congestus_sky.png",
+      "captures/gallery/towering_congestus_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 15.566666666666666,
+        "advance_clock": false,
+        "turbidity": 3.2,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.32,
+        "genus": "congestus",
+        "base_m": 0.0,
+        "temperature_c": 28.0,
+        "dewpoint_c": 19.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 900.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 5,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "cirrus_veil",
+    "caption": "Cirrus at 8 km: thin, high and barely attenuating \u2014 a whitened sky, not a grey one.",
+    "conditions": "2024-06-21 15:10 UTC  sun +38.0 deg el / 263 deg az  moon -37.2 deg, full (100 %)  turbidity 2.4  cloud 45 % cirrus",
+    "sun_elevation_deg": 37.99,
+    "moon_elevation_deg": -37.22,
+    "moon_illuminated": 0.996,
+    "turbidity": 2.4,
+    "cloud_cover": 0.45,
+    "surface_weather": "2024-06-20 15:10 UTC + 24 h, 25 samples  air 14.5 .. 22.2 degC  RH 52 .. 85 %  peak DNI 524 W/m2  cloud 45 %  visibility 32.2 km",
+    "images": [
+      "captures/gallery/cirrus_veil_sky.png",
+      "captures/gallery/cirrus_veil_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 15.166666666666666,
+        "advance_clock": false,
+        "turbidity": 2.4,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.45,
+        "genus": "cirrus",
+        "base_m": 0.0,
+        "temperature_c": 22.0,
+        "dewpoint_c": 12.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 2600.0,
+        "cells": 256,
+        "levels": 48,
+        "cell_m": 220.0,
+        "seed": 2,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "overcast_stratocumulus",
+    "caption": "Overcast stratocumulus. Shadowless, and about a quarter of the clear-sky light.",
+    "conditions": "2024-06-21 15:22 UTC  sun +36.0 deg el / 266 deg az  moon -35.3 deg, full (100 %)  turbidity 3.4  cloud 99 % stratocumulus",
+    "sun_elevation_deg": 36.0,
+    "moon_elevation_deg": -35.3,
+    "moon_illuminated": 0.996,
+    "turbidity": 3.4,
+    "cloud_cover": 0.99,
+    "surface_weather": "2024-06-20 15:22 UTC + 24 h, 25 samples  air 12.0 .. 14.2 degC  RH 87 .. 100 %  peak DNI 9 W/m2  cloud 99 %  visibility 21.1 km",
+    "images": [
+      "captures/gallery/overcast_stratocumulus_sky.png",
+      "captures/gallery/overcast_stratocumulus_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 15.366666666666667,
+        "advance_clock": false,
+        "turbidity": 3.4,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.99,
+        "genus": "stratocumulus",
+        "base_m": 0.0,
+        "temperature_c": 14.0,
+        "dewpoint_c": 12.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 7,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "golden_hour",
+    "caption": "Sun four degrees up, solved from the ephemeris. Long airmass, warm beam, cool shadow.",
+    "conditions": "2024-06-21 18:44 UTC  sun +4.0 deg el / 302 deg az  moon -5.5 deg, full (100 %)  turbidity 3.6  cloud 26 % cumulus",
+    "sun_elevation_deg": 3.98,
+    "moon_elevation_deg": -5.52,
+    "moon_illuminated": 0.997,
+    "turbidity": 3.6,
+    "cloud_cover": 0.26,
+    "surface_weather": "2024-06-20 18:44 UTC + 24 h, 25 samples  air 16.3 .. 25.4 degC  RH 46 .. 81 %  peak DNI 668 W/m2  cloud 26 %  visibility 19.4 km",
+    "images": [
+      "captures/gallery/golden_hour_sky.png",
+      "captures/gallery/golden_hour_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 18.733333333333334,
+        "advance_clock": false,
+        "turbidity": 3.6,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.26,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 22.0,
+        "dewpoint_c": 13.0,
+        "thickness_m": 0.0,
+        "optical_depth": 20.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 17,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "blue_hour",
+    "caption": "Civil twilight, sun four degrees below. Daylight fading out, stars not yet in.",
+    "conditions": "2024-06-21 19:42 UTC  sun -3.9 deg el / 312 deg az  moon +1.7 deg, full (100 %)  turbidity 3.0  cloud 22 % cumulus",
+    "sun_elevation_deg": -3.94,
+    "moon_elevation_deg": 1.66,
+    "moon_illuminated": 0.998,
+    "turbidity": 3.0,
+    "cloud_cover": 0.22,
+    "surface_weather": "2024-06-20 19:42 UTC + 24 h, 25 samples  air 13.3 .. 22.7 degC  RH 51 .. 92 %  peak DNI 723 W/m2  cloud 22 %  visibility 25.0 km",
+    "images": [
+      "captures/gallery/blue_hour_sky.png",
+      "captures/gallery/blue_hour_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 19.7,
+        "advance_clock": false,
+        "turbidity": 3.0,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.22,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 18.0,
+        "dewpoint_c": 12.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 17,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "full_moon_night",
+    "caption": "A real full-moon night: same Perez distribution, one source 400,000x fainter.",
+    "conditions": "2024-07-23 00:50 UTC  sun -19.0 deg el / 22 deg az  moon +24.4 deg, waning gibbous (96 %)  turbidity 2.3  cloud 18 % cumulus",
+    "sun_elevation_deg": -18.95,
+    "moon_elevation_deg": 24.36,
+    "moon_illuminated": 0.964,
+    "turbidity": 2.3,
+    "cloud_cover": 0.18,
+    "surface_weather": "2024-07-22 00:50 UTC + 24 h, 25 samples  air 14.9 .. 24.6 degC  RH 37 .. 68 %  peak DNI 775 W/m2  cloud 18 %  visibility 33.6 km",
+    "images": [
+      "captures/gallery/full_moon_night_sky.png",
+      "captures/gallery/full_moon_night_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-07-23",
+        "hour_utc": 0.8333333333333334,
+        "advance_clock": false,
+        "turbidity": 2.3,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 3.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.6,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.18,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 15.0,
+        "dewpoint_c": 9.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 23,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.0,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "morning_fog",
+    "caption": "Radiation fog, 180 m visibility \u2014 a saturated surface layer, so no cloud above it.",
+    "conditions": "2024-06-21 04:16 UTC  sun +8.1 deg el / 64 deg az  moon -18.6 deg, full (99 %)  turbidity 4.5  no cloud field built",
+    "sun_elevation_deg": 8.1,
+    "moon_elevation_deg": -18.56,
+    "moon_illuminated": 0.989,
+    "turbidity": 4.5,
+    "cloud_cover": null,
+    "surface_weather": "2024-06-20 04:16 UTC + 24 h, 25 samples  air 21.8 .. 23.5 degC  RH 49 .. 54 %  peak DNI 869 W/m2  cloud 0 %  visibility 0.2 km",
+    "images": [
+      "captures/gallery/morning_fog_sky.png",
+      "captures/gallery/morning_fog_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 4.266666666666667,
+        "advance_clock": false,
+        "turbidity": 4.5,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": false,
+        "cover": 0.35,
+        "genus": "cumulus",
+        "base_m": 0.0,
+        "temperature_c": 22.0,
+        "dewpoint_c": 12.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 256,
+        "levels": 48,
+        "cell_m": 60.0,
+        "seed": 0,
+        "march_steps": 64
+      },
+      "fog": {
+        "enabled": true,
+        "visibility_m": 180.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": true,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 0.4,
+        "direction_deg": 0.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.0,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "rain_squall",
+    "caption": "22 mm/h from a deep deck: Marshall-Palmer drop sizes, streaks at 1/60 s exposure.",
+    "conditions": "2024-06-21 16:10 UTC  sun +28.0 deg el / 275 deg az  moon -27.7 deg, full (100 %)  turbidity 2.6  cloud 96 % stratocumulus",
+    "sun_elevation_deg": 28.01,
+    "moon_elevation_deg": -27.71,
+    "moon_illuminated": 0.997,
+    "turbidity": 2.6,
+    "cloud_cover": 0.96,
+    "surface_weather": "2024-06-20 16:10 UTC + 24 h, 25 samples  air 13.5 .. 15.4 degC  RH 88 .. 100 %  peak DNI 38 W/m2  cloud 96 %  visibility 2.9 km",
+    "images": [
+      "captures/gallery/rain_squall_sky.png",
+      "captures/gallery/rain_squall_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-06-21",
+        "hour_utc": 16.166666666666668,
+        "advance_clock": false,
+        "turbidity": 2.6,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.96,
+        "genus": "stratocumulus",
+        "base_m": 0.0,
+        "temperature_c": 15.0,
+        "dewpoint_c": 13.5,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 31,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": true,
+        "visibility_m": 3200.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 11.0,
+        "direction_deg": 25.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.5,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": true,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 22.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "blizzard",
+    "caption": "Sub-zero air, 400 m visibility, flakes swaying as they fall.",
+    "conditions": "2024-01-18 14:10 UTC  sun +12.0 deg el / 219 deg az  moon +37.0 deg, first quarter (55 %)  turbidity 3.0  cloud 98 % stratocumulus",
+    "sun_elevation_deg": 11.98,
+    "moon_elevation_deg": 36.95,
+    "moon_illuminated": 0.549,
+    "turbidity": 3.0,
+    "cloud_cover": 0.98,
+    "surface_weather": "2024-01-17 14:10 UTC + 24 h, 25 samples  air -7.6 .. -7.0 degC  RH 86 .. 90 %  peak DNI 10 W/m2  cloud 98 %  visibility 0.3 km",
+    "images": [
+      "docs/images/gallery/blizzard_sky.png",
+      "docs/images/gallery/blizzard_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": 48.14,
+        "longitude_deg": 11.58,
+        "date_utc": "2024-01-18",
+        "hour_utc": 14.166666666666666,
+        "advance_clock": false,
+        "turbidity": 3.0,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.98,
+        "genus": "stratocumulus",
+        "base_m": 0.0,
+        "temperature_c": -7.0,
+        "dewpoint_c": -9.0,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 13,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": true,
+        "visibility_m": 260.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 13.0,
+        "direction_deg": -40.0,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.6,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": true,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 8.0,
+        "max_particles": 90000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.95,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 120.0,
+        "flake_min_diameter_mm": 2.0,
+        "flake_max_diameter_mm": 10.0,
+        "fall_speed_mps": 1.1,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.5,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  },
+  {
+    "scenario": "randomised",
+    "caption": "`wx.randomize(26)` \u2014 one integer, and every parameter drawn with its couplings.",
+    "conditions": "2023-09-18 23:30 UTC  sun +53.2 deg el / 328 deg az  moon +64.9 deg, waxing crescent (14 %)  turbidity 2.9  cloud 50 % congestus",
+    "sun_elevation_deg": 53.2,
+    "moon_elevation_deg": 64.93,
+    "moon_illuminated": 0.14,
+    "turbidity": 2.88,
+    "cloud_cover": 0.502,
+    "surface_weather": "2023-09-17 23:30 UTC + 24 h, 25 samples  air 13.5 .. 20.5 degC  RH 64 .. 100 %  peak DNI 451 W/m2  cloud 50 %  visibility 26.2 km",
+    "images": [
+      "captures/gallery/randomised_sky.png",
+      "captures/gallery/randomised_subject.png"
+    ],
+    "state": {
+      "general": {
+        "enabled": true,
+        "follow_prim": "/World/CameraSky",
+        "time_source": "manual",
+        "time_scale": 1.0,
+        "seed": 42
+      },
+      "sky": {
+        "enabled": true,
+        "latitude_deg": -30.700059506510435,
+        "longitude_deg": -155.66120705076258,
+        "date_utc": "2023-09-18",
+        "hour_utc": 23.505790702987547,
+        "advance_clock": false,
+        "turbidity": 2.88401154260373,
+        "ground_albedo": [
+          0.16,
+          0.17,
+          0.12
+        ],
+        "exposure_scale": 1.0,
+        "sun_enabled": true,
+        "moon_enabled": true,
+        "star_intensity": 1.0,
+        "dome_resolution": 1024
+      },
+      "clouds": {
+        "enabled": true,
+        "cover": 0.5019705549743476,
+        "genus": "congestus",
+        "base_m": 0.0,
+        "temperature_c": 20.320045250274614,
+        "dewpoint_c": 13.548386498479484,
+        "thickness_m": 0.0,
+        "optical_depth": 0.0,
+        "feature_m": 400.0,
+        "cells": 384,
+        "levels": 48,
+        "cell_m": 45.0,
+        "seed": 677099,
+        "march_steps": 160
+      },
+      "fog": {
+        "enabled": false,
+        "visibility_m": 500.0,
+        "color": [
+          0.72,
+          0.74,
+          0.78
+        ],
+        "color_intensity": 1.0,
+        "start_distance_m": 0.0,
+        "end_distance_m": 20000.0,
+        "height_fog": false,
+        "base_height_m": 0.0,
+        "height_density": 1.0,
+        "height_falloff": 0.5,
+        "density_calibration": 1.0
+      },
+      "wind": {
+        "speed_mps": 8.699344225402847,
+        "direction_deg": -107.1499754340558,
+        "vertical_mps": 0.0,
+        "gust_strength": 0.20791393769399513,
+        "gust_period_s": 6.0
+      },
+      "rain": {
+        "enabled": false,
+        "volume_radius_m": 8.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.8,
+          0.85,
+          0.9
+        ],
+        "opacity": 0.35,
+        "self_illumination": 0.5,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "rate_mm_h": 10.0,
+        "density_scale": 0.004,
+        "drop_min_diameter_mm": 0.5,
+        "drop_max_diameter_mm": 6.0,
+        "streak_exposure_s": 0.016666666666666666,
+        "streak_width_scale": 2.0
+      },
+      "snow": {
+        "enabled": false,
+        "volume_radius_m": 12.0,
+        "volume_height_m": 10.0,
+        "max_particles": 30000,
+        "color": [
+          0.95,
+          0.96,
+          1.0
+        ],
+        "opacity": 0.9,
+        "self_illumination": 0.3,
+        "near_clearance_m": 1.0,
+        "material": "preview",
+        "cast_shadows": false,
+        "number_density_m3": 2.0,
+        "flake_min_diameter_mm": 1.0,
+        "flake_max_diameter_mm": 6.0,
+        "fall_speed_mps": 1.0,
+        "fall_speed_jitter": 0.3,
+        "sway_amplitude_m": 0.3,
+        "sway_frequency_hz": 0.5
+      },
+      "lighting": {
+        "enabled": false,
+        "light_scale": 1.0,
+        "include_dome": true
+      },
+      "schema_version": 2
+    }
+  }
+]

@@ -12,6 +12,7 @@ import pytest
 
 from weather_fx.core.meteorology import (
     COLUMNS,
+    beam_tint,
     aerosol_visibility_m,
     airmass,
     clear_sky_irradiance,
@@ -331,3 +332,78 @@ def test_the_tropics_barely_have_a_season():
     july = np.mean([_seasonal_temperature(rng(i), 196, 0.0) for i in range(300)])
     january = np.mean([_seasonal_temperature(rng(i), 15, 0.0) for i in range(300)])
     assert abs(july - january) < 6.0
+
+
+# --- the colour of the beam ------------------------------------------------------------------------
+
+
+def test_a_high_sun_is_very_nearly_white():
+    r, g, b = beam_tint(75.0, 2.5)
+    assert 0.95 < g < 1.05
+    assert abs(r - b) < 0.3  # a slight warmth, not a colour cast
+
+
+def test_a_low_sun_is_orange_and_the_blue_is_gone():
+    """The whole reason this function exists. Twelve airmasses remove essentially all of the blue
+    and little of the red, which is the colour of every photograph anyone takes at that hour."""
+    r, g, b = beam_tint(4.0, 3.0)
+    assert r > 1.4
+    assert b < 0.25
+    assert r > g > b
+
+
+def test_the_reddening_is_monotone_as_the_sun_sets():
+    reds, blues = [], []
+    for elevation in (60.0, 40.0, 20.0, 10.0, 5.0, 2.0):
+        r, _, b = beam_tint(elevation, 3.0)
+        reds.append(r)
+        blues.append(b)
+    assert all(x < y for x, y in zip(reds, reds[1:]))
+    assert all(x > y for x, y in zip(blues, blues[1:]))
+
+
+def test_the_tint_preserves_luminance_so_it_cannot_dim_a_sunset_twice():
+    """Brightness is `clear_sky_irradiance`'s answer. If the tint carried the extinction as well,
+    every low sun would be attenuated once by the airmass law and again by its own colour."""
+    for elevation in (80.0, 30.0, 8.0, 3.0):
+        r, g, b = beam_tint(elevation, 3.2)
+        assert 0.2126 * r + 0.7152 * g + 0.0722 * b == pytest.approx(1.0, rel=1e-9)
+
+
+def test_haze_reddens_a_given_sun_further_than_clean_air_does():
+    clean = beam_tint(8.0, 2.0)
+    hazy = beam_tint(8.0, 8.0)
+    assert hazy[0] > clean[0]
+    assert hazy[2] < clean[2]
+
+
+def test_a_sun_on_the_horizon_does_not_divide_by_a_vanished_beam():
+    for elevation in (0.0, -5.0, -30.0):
+        tint = beam_tint(elevation, 3.0)
+        assert all(np.isfinite(c) and c >= 0.0 for c in tint)
+
+
+def test_the_tint_is_balanced_for_daylight_so_a_midday_cloud_is_white():
+    """Every photograph of a white cloud was white-balanced, by a camera or by the eye, and the
+    raw beam at midday is already well warmer than the daylight white point. Rendering without
+    this step gives clouds that are correctly lit and visibly khaki -- measured, in this project's
+    own gallery, before the balance existed."""
+    from weather_fx.core.meteorology import (
+        WHITE_BALANCE_ELEVATION_DEG,
+        WHITE_BALANCE_TURBIDITY,
+    )
+
+    reference = beam_tint(WHITE_BALANCE_ELEVATION_DEG, WHITE_BALANCE_TURBIDITY)
+    assert reference == pytest.approx((1.0, 1.0, 1.0), abs=1e-9)
+    for elevation in (30.0, 45.0, 60.0, 80.0):
+        r, g, b = beam_tint(elevation, 2.8)
+        assert max(r, g, b) / min(r, g, b) < 1.25  # a tinge, not a cast
+
+
+def test_balancing_does_not_neutralise_the_sunset():
+    """Auto white balance would, which is why cameras keep a *daylight* preset and photographers
+    use it at golden hour."""
+    raw = beam_tint(4.0, 3.2, white_balance=False)
+    balanced = beam_tint(4.0, 3.2)
+    assert balanced[0] / balanced[2] > 0.5 * (raw[0] / raw[2])
+    assert balanced[0] > 1.4 and balanced[2] < 0.3

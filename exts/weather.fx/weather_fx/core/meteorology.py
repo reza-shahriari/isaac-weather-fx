@@ -51,6 +51,7 @@ from .physics import extinction_from_visibility, visibility_from_extinction
 
 __all__ = [
     "COLUMNS",
+    "beam_tint",
     "DiurnalSeries",
     "aerosol_visibility_m",
     "airmass",
@@ -193,6 +194,92 @@ def solar_irradiance(
     dni = dni_clear * (1.0 - cover)
     dhi = np.maximum(global_cloudy - dni * sin_el, 0.0)
     return dni, np.minimum(dhi, SOLAR_CONSTANT_W_M2)
+
+
+#: Representative wavelengths of the linear sRGB primaries, micrometres. Three numbers standing in
+#: for three response curves: enough to get the *direction* of the colour shift right, which is
+#: what a sunset is, and far cheaper than a spectral render.
+RGB_WAVELENGTHS_UM = (0.610, 0.550, 0.465)
+#: Luminance weights of those primaries (Rec. 709). The tint is divided by the luminance it
+#: carries, so reddening changes the colour of the beam without changing how bright it is -- the
+#: brightness is already in :func:`clear_sky_irradiance`, and applying it twice dims every sunset.
+RGB_LUMINANCE = (0.2126, 0.7152, 0.0722)
+#: Angstrom exponent of the aerosol extinction. 1.3 is the continental value; maritime aerosol is
+#: nearer 0.5 (bigger particles, flatter spectrum) and smoke nearer 2.
+ANGSTROM_EXPONENT = 1.3
+#: Aerosol optical depth at 550 nm, as a function of turbidity: ``clean + per_turbidity * (T - 1)``.
+#: **Only the aerosol is spectrally selective here.** The rest of what
+#: :data:`CLEAR_SKY_TRANSMITTANCE` accounts for -- water vapour, ozone, the mixed gases -- absorbs
+#: broadly across the visible and does not redden anything, so attributing all of it to a
+#: wavelength^-1.3 aerosol makes a midday cloud beige. Measured against the rendered gallery: it
+#: did. These give AOD 0.075 for very clean air and 0.4 for a thick haze, which is the range
+#: sun photometers report.
+AEROSOL_OPTICAL_DEPTH_CLEAN = 0.03
+AEROSOL_OPTICAL_DEPTH_PER_TURBIDITY = 0.045
+#: The illuminant the tint is balanced against: a 45 degree sun through clean air. **Every
+#: photograph anyone has seen of a white cloud was white-balanced**, by a camera or by the eye,
+#: and the raw beam at midday is already a good deal warmer than the daylight white point -- so a
+#: render that skips this step produces clouds that are correctly lit and visibly khaki. Balancing
+#: against a fixed daylight reference rather than against the scene's own illuminant is what keeps
+#: the sunset: auto white balance would neutralise that too, which is why cameras have a daylight
+#: preset and photographers use it at golden hour.
+WHITE_BALANCE_ELEVATION_DEG = 45.0
+WHITE_BALANCE_TURBIDITY = 2.5
+
+
+def _rayleigh_optical_depth(wavelength_um: float) -> float:
+    """Sea-level Rayleigh optical depth at the zenith (Hansen & Travis 1974)."""
+    inverse = wavelength_um**-2
+    return 0.008569 * inverse**2 * (1.0 + 0.0113 * inverse + 0.00013 * inverse**2)
+
+
+def _beam_transmittance(elevation_deg: float, turbidity: float) -> Tuple[float, float, float]:
+    """Per-channel transmittance of the direct beam, Rayleigh plus aerosol on the airmass."""
+    airmass_value = float(airmass(max(float(elevation_deg), 0.0)))
+    aerosol_550 = max(
+        AEROSOL_OPTICAL_DEPTH_CLEAN
+        + AEROSOL_OPTICAL_DEPTH_PER_TURBIDITY * (float(turbidity) - 1.0),
+        0.0,
+    )
+    out = []
+    for wavelength in RGB_WAVELENGTHS_UM:
+        aerosol = aerosol_550 * (wavelength / 0.55) ** -ANGSTROM_EXPONENT
+        depth = _rayleigh_optical_depth(wavelength) + aerosol
+        out.append(math.exp(-depth * airmass_value))
+    return tuple(out)
+
+
+def beam_tint(
+    elevation_deg: float, turbidity: float, *, white_balance: bool = True
+) -> Tuple[float, float, float]:
+    """The colour of the direct beam at this sun or moon elevation, luminance-preserving.
+
+    **This is what makes a sunset orange**, and leaving it out is why a low sun can light a scene
+    that is merely dim rather than warm. The beam reaching the ground at four degrees has crossed
+    twelve airmasses; Rayleigh scattering alone removes 58 % of the blue against 26 % of the red
+    over one, so over twelve the blue is gone and what is left is the colour everyone photographs.
+    Clouds do not make themselves orange at sunset -- they are white, and they are lit by that.
+
+    Returned as a multiplier about unit luminance, so it changes the beam's *colour* and not its
+    brightness: the brightness is :func:`clear_sky_irradiance`'s answer and applying the extinction
+    twice would leave every golden hour underexposed.
+    """
+    airmass_value = float(airmass(max(float(elevation_deg), 0.0)))
+    aerosol_550 = max(
+        AEROSOL_OPTICAL_DEPTH_CLEAN
+        + AEROSOL_OPTICAL_DEPTH_PER_TURBIDITY * (float(turbidity) - 1.0),
+        0.0,
+    )
+
+    channels = list(_beam_transmittance(elevation_deg, turbidity))
+    if white_balance:
+        reference = _beam_transmittance(WHITE_BALANCE_ELEVATION_DEG, WHITE_BALANCE_TURBIDITY)
+        channels = [c / r for c, r in zip(channels, reference)]
+    luminance = sum(w * c for w, c in zip(RGB_LUMINANCE, channels))
+    if luminance <= 0.0:
+        # Below any usable elevation the beam is gone; return white rather than a divide.
+        return (1.0, 1.0, 1.0)
+    return tuple(c / luminance for c in channels)
 
 
 # --- visibility and precipitation ------------------------------------------------------------

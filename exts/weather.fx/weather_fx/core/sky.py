@@ -49,6 +49,7 @@ from weather_fx.core.celestial import (
     sun_position,
 )
 from weather_fx.core.clouds import CloudField, cloud_profile, lifting_condensation_level_m
+from weather_fx.core.meteorology import beam_tint
 
 __all__ = [
     "MOONLIGHT_TINT",
@@ -59,6 +60,7 @@ __all__ = [
     "perez",
     "sky_luminance_cd_m2",
     "sky_radiance_rgb",
+    "dome_exposure",
     "environment_map",
 ]
 
@@ -186,6 +188,9 @@ class SkyConditions:
     cloud: Optional[CloudField] = None
     star_intensity: float = 1.0
     exposure_scale: float = 1.0
+    #: Samples per ray in the cloud march. Carried here rather than read from the state at the
+    #: march, so every consumer of one `SkyConditions` integrates the cloud identically.
+    march_steps: int = 64
 
     @property
     def daylight(self) -> float:
@@ -255,6 +260,7 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         cloud=field,
         star_intensity=float(sky.star_intensity),
         exposure_scale=float(sky.exposure_scale),
+        march_steps=int(clouds.march_steps),
     )
 
 
@@ -365,21 +371,67 @@ def _composite_cloud(
 
     lit_by = conditions.sun if conditions.sun.elevation_deg > 0.0 else conditions.moon
     sun_direction = lit_by.direction() if lit_by.elevation_deg > 0.0 else None
-    result = field.march(origin, directions, sun_direction=sun_direction, steps=64)
+    result = field.march(
+        origin, directions, sun_direction=sun_direction, steps=int(conditions.march_steps)
+    )
 
     out = sky * result.transmittance[..., None]
     if result.radiance is not None:
         # The incident illuminance on the cloud tops, spread over the hemisphere: what the
         # albedo the march returns is a fraction *of*.
+        # The beam that lights the cloud is the beam that reached it, and at a low sun that beam
+        # is orange. A cloud is white; everything people photograph at sunset is this tint.
+        reddening = np.asarray(beam_tint(lit_by.elevation_deg, conditions.turbidity))
         if lit_by is conditions.sun:
             source = 1.6e9 * math.sin(math.radians(max(lit_by.elevation_deg, 0.0)))
             source *= conditions.daylight
-            tint = np.array([1.0, 0.985, 0.95])
+            tint = reddening
         else:
             source = conditions.moon_lux / math.pi * 1.0e4
-            tint = np.asarray(MOONLIGHT_TINT)
+            tint = np.asarray(MOONLIGHT_TINT) * reddening
         out = out + result.radiance[..., None] * source / math.pi * tint * 1e-4
     return out
+
+
+#: Renderer-side level the *brightest part of the sky* is exposed to, in the units an RTX dome
+#: light's `intensity` multiplies its texture by. Measured by sweeping the intensity on a demo
+#: stage: a clear midday sky's 99th percentile sits near 20,000 cd/m2 and renders correctly at an
+#: intensity near 0.025, which puts that percentile at 500.
+DOME_HIGHLIGHT_TARGET = 500.0
+#: The 99th-percentile luminance of a clear midday sky, cd/m2 -- the anchor the adaptation is
+#: written about. Measured from this model at a 58 degree sun.
+DAYLIGHT_REFERENCE_CD_M2 = 20_000.0
+#: How completely the exposure adapts to the scene. **A tone decision, stated rather than hidden.**
+#: The sky spans seven decades between noon and a moonless night and a display spans two, so
+#: something has to compress it: 1.0 exposes every frame to the same brightness and a moonlit
+#: night looks like an overcast afternoon, while 0.0 holds one exposure for the whole day and
+#: every frame but one is black or white. At 0.83 a full moon lands about three and a half stops
+#: below noon -- dark, legible, and in the right order.
+EXPOSURE_ADAPTATION = 0.83
+
+
+def dome_exposure(image: np.ndarray) -> float:
+    """The dome-light intensity that puts ``image`` (cd/m2) where a camera would put it.
+
+    **Meter on the highlights, not on the middle.** A median is the wrong statistic for a sky and
+    it fails in both directions. At sunset the dim anti-solar half drags the median down, the
+    exposure up, and the whole solar side clips to white -- measured, a 4 degree sun put the 99th
+    percentile 2.4x above where noon puts it. At civil twilight the median of the upper hemisphere
+    is *zero* to float precision and the exposure ran to its clamp, which is a white frame at the
+    darkest moment of the day. The 99th percentile is stable through both, and it is also what a
+    photographer meters.
+
+    The percentile is taken over the **sky only**: the ground half of a lat-long map is far darker
+    and including it drags the reference down and the intensity up.
+    """
+    directions = latlong_directions(image.shape[0])
+    above = directions[..., 1] > 0.0
+    luminance = image[above].mean(axis=-1) if np.any(above) else np.asarray([1.0])
+    bright = float(np.percentile(luminance, 99.0))
+    adapted = DAYLIGHT_REFERENCE_CD_M2 * (
+        max(bright, 1e-9) / DAYLIGHT_REFERENCE_CD_M2
+    ) ** EXPOSURE_ADAPTATION
+    return float(np.clip(DOME_HIGHLIGHT_TARGET / max(adapted, 1e-9), 1e-6, 1e9))
 
 
 def environment_map(conditions: SkyConditions, height: int = 1024) -> np.ndarray:

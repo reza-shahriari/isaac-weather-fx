@@ -304,6 +304,8 @@ class CloudField:
     #: observed fair-weather cumulus size mode; below it a field is carrying structure that no
     #: cloud of this genus has, which one band renders as specks and the other smears.
     feature_m: float = 400.0
+    erosion_scale: float = 1.0
+    beta_scale: float = 1.0
     _density: np.ndarray = field(init=False, repr=False)
     _eroded: np.ndarray = field(init=False, repr=False, default=None)
     #: Per-level cut value. Held for inspection and for the tests that pin the morphology.
@@ -340,9 +342,13 @@ class CloudField:
         # Cell sizes in metres, which is the frame the spectrum below is shaped in.
         vertical_m = self.thickness_m / self.levels
         cell_size_m = (vertical_m, self.cell_m, self.cell_m)
+        
+        beta = self.profile.beta * self.beta_scale
+        erosion = self.profile.erosion * self.erosion_scale
+
         noise = _periodic_fractal_noise(
             shape,
-            self.profile.beta,
+            beta,
             self.seed,
             cell_size_m=cell_size_m,
             min_wavelength_m=self.feature_m,
@@ -350,7 +356,7 @@ class CloudField:
         )
         detail = _periodic_fractal_noise(
             shape,
-            max(self.profile.beta - 1.2, 1.0),
+            max(beta - 1.2, 1.0),
             self.seed + 7919,
             cell_size_m=cell_size_m,
             min_wavelength_m=max(0.35 * self.feature_m, 2.5 * max(self.cell_m, vertical_m)),
@@ -358,7 +364,7 @@ class CloudField:
         )
         # Erosion bites where the field is already near its own edge and leaves the core alone:
         # `noise * (1 - noise)` peaks at the midpoint and vanishes at both extremes.
-        eroded = noise - self.profile.erosion * (detail - 0.5) * 4.0 * noise * (1.0 - noise)
+        eroded = noise - erosion * (detail - 0.5) * 4.0 * noise * (1.0 - noise)
         self._eroded = eroded
 
         u = (np.arange(self.levels, dtype=np.float64) + 0.5) / self.levels

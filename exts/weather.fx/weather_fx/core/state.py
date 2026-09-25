@@ -195,6 +195,10 @@ class CloudParams:
     feature_m: float = param(400.0, "Feature size", min=80.0, max=4000.0, unit="m", advanced=True,
                              tooltip="Diameter of the smallest structure the field carries. 400 m "
                                      "is the low end of the observed fair-weather cumulus mode.")
+    erosion_scale: float = param(1.0, "Erosion scale", min=0.0, max=5.0, advanced=True,
+                                 tooltip="Scales the high-frequency erosion. 0 is smooth blobs, >1 is wispier.")
+    beta_scale: float = param(1.0, "Smoothness (beta scale)", min=0.5, max=2.0, advanced=True,
+                              tooltip="Scales the fractal noise spectrum. Higher is smoother, lower adds overall high-frequency detail.")
     cells: int = param(256, "Grid cells", min=32, max=512, advanced=True)
     levels: int = param(48, "Grid levels", min=8, max=128, advanced=True)
     cell_m: float = param(60.0, "Cell size", min=10.0, max=400.0, unit="m", advanced=True,

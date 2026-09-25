@@ -249,6 +249,8 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
             thickness_m=float(clouds.thickness_m),
             optical_depth=float(clouds.optical_depth),
             feature_m=float(clouds.feature_m),
+            erosion_scale=float(clouds.erosion_scale),
+            beta_scale=float(clouds.beta_scale),
         )
 
     return SkyConditions(

@@ -30,6 +30,7 @@ exact and resampling a texture is not.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
 import math
 import os
@@ -463,6 +464,9 @@ class SkyEffect(Effect):
         light.CreateColorAttr(Gf.Vec3f(*colour))
 
 
+_BAKE_COUNTER = itertools.count()
+
+
 def _unlink(path: Any) -> None:
     try:
         pathlib.Path(path).unlink()
@@ -499,7 +503,10 @@ def _bake(state: Any, key: str, path: str, directory: pathlib.Path, rows: Option
         float(state.sky.white_balance))
     image = (image * gains.astype(np.float32)).astype(np.float32)
     directory.mkdir(parents=True, exist_ok=True)
-    texture = directory / f"weather_fx_sky_{os.getpid()}_{key[:18]}.exr"
+    # A counter, not the key: two bakes of one sky (the quick first one and the full one) must
+    # never share a file, or the second overwrites the one the renderer is reading -- which is
+    # the "Unexpected data block y coordinate" error, and a black dome.
+    texture = directory / f"weather_fx_sky_{os.getpid()}_{next(_BAKE_COUNTER):06d}.exr"
     write_exr(texture, image)
     return {"texture": texture, "exposure": exposure, "key": key,
             "conditions": conditions, "gains": tuple(float(g) for g in gains)}

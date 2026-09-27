@@ -289,7 +289,7 @@ class CloudVolumeEffect(Effect):
 # --------------------------------------------------------------------------- worker side
 
 def _build_volumes(state: Any, up_axis: int, mpu: float, directory: pathlib.Path, key: tuple) -> dict:
-    """Runs in the worker thread: build the field, voxelise it, write one file per tile."""
+    """Runs in the worker thread: build the field, voxelise it, write it once for every tile."""
     import hashlib
 
     from .vdb import import_openvdb, write_fog_volume
@@ -305,17 +305,22 @@ def _build_volumes(state: Any, up_axis: int, mpu: float, directory: pathlib.Path
     digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:12]
     to_units = 1.0 / mpu
     voxel = tuple(v * to_units for v in grid.voxel_m)
-    tiles, files, voxels = [], [], 0
+    # **One file for every tile.** A translate on a box carries its density texture with it (the
+    # drift already relies on that), so each tile is the same grid shifted by whole tiles. Nine
+    # copies of the file cost nine writes -- held under the interpreter lock by the OpenVDB
+    # binding, which is UI time -- and nine textures on the GPU for no information.
+    path = directory / f"weather_fx_cloud_{os.getpid()}_{digest}.vdb"
+    voxels = write_fog_volume(openvdb, path, grid.values, voxel,
+                              tuple(c * to_units for c in grid.first_centre_m))
+    files = [path]
+    tiles = []
     for placement in tile_placements(grid, state.clouds.volume_tiles, up_axis):
-        path = directory / f"weather_fx_cloud_{os.getpid()}_{digest}_{placement.name}.vdb"
-        voxels = write_fog_volume(openvdb, path, grid.values, voxel,
-                                  tuple(c * to_units for c in placement.first_centre_m))
-        files.append(path)
         tiles.append({
             "name": placement.name,
             "file": str(path),
-            "low": tuple(c * to_units for c in placement.low_m),
-            "high": tuple(c * to_units for c in placement.high_m),
+            "low": tuple(c * to_units for c in grid.low_m),
+            "high": tuple(c * to_units for c in grid.high_m),
+            "shift": tuple((p - g) * to_units for p, g in zip(placement.low_m, grid.low_m)),
         })
     return {"tiles": tiles, "files": files, "voxels": voxels, "tile_m": grid.tile_m,
             "extinction_per_m": field.extinction_per_m}
@@ -330,10 +335,12 @@ def _remove_files(files) -> None:
 
 
 def _author_volume_box(stage: Any, prim_path: str, tile: dict) -> str:
-    """A mesh box at the tile's world bounds, bound to ``OmniVolumeDensity``. Returns the shader path.
+    """A mesh box at the grid's bounds, bound to ``OmniVolumeDensity``. Returns the shader path.
 
-    **No transform on the box**: the density texture is sampled in the prim's local frame and the
-    grid's transform is already in world units, so the two agree only when local is world.
+    The box's points are the grid's own bounds, because the density texture is sampled in the
+    prim's local frame and the grid's transform is in those units. The tile's place comes from a
+    **translate only**: it carries the texture with the box, where a scale would stretch it
+    (ADR 0144's failure).
     """
     from pxr import Gf, Sdf, UsdGeom, UsdShade
 
@@ -348,7 +355,11 @@ def _author_volume_box(stage: Any, prim_path: str, tile: dict) -> str:
         [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6, 3, 0, 4, 7])
     # Authored, not computed: a prim with no bounds is culled before anything opens the file.
     mesh.CreateExtentAttr([Gf.Vec3f(x0, y0, z0), Gf.Vec3f(x1, y1, z1)])
-    UsdGeom.Xformable(mesh.GetPrim()).ClearXformOpOrder()
+    xformable = UsdGeom.Xformable(mesh.GetPrim())
+    xformable.ClearXformOpOrder()
+    shift = tile.get("shift", (0.0, 0.0, 0.0))
+    if any(abs(v) > 0.0 for v in shift):
+        xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(Gf.Vec3d(*shift))
     UsdGeom.PrimvarsAPI(mesh.GetPrim()).CreatePrimvar(
         "isVolume", Sdf.ValueTypeNames.Bool).Set(True)
     material = UsdShade.Material.Define(stage, f"{prim_path}/Material")

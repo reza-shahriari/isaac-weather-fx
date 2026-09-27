@@ -80,6 +80,13 @@
   `docs/ARCHITECTURE.md` and `docs/LIMITATIONS.md`, and planned work is only in `ROADMAP.md`.
 
 ### Fixed
+- The quick first dome bake and the full bake of the same sky wrote the same file (the name kept
+  only 18 characters of the key), so the full bake overwrote the texture the renderer was
+  reading: "Unexpected data block y coordinate" from OpenEXR and a black dome. Each bake now gets
+  its own file.
+- All cloud volume tiles share one VDB file, each tile placed by a translate, instead of nine
+  identical files: nine times less writing under the interpreter lock and nine times less texture
+  memory.
 - **Every sky in a session was the first one.** The baked environment map was written to one path
   per process, and a renderer caches a texture by its path — so a thirteen-scenario sweep
   rendered thirteen different skies as one. Overwriting the file while the loader still held it

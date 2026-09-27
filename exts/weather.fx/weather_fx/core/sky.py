@@ -204,6 +204,9 @@ class SkyConditions:
     #: environment map. The march is the whole cost of a cloudy bake and a cloud's edges are soft,
     #: so a quarter of the map's rows loses little and costs a sixteenth.
     cloud_rows: int = 256
+    #: How far the wind has carried the cloud field, in its own Y-up frame, metres. The observer
+    #: sits at the field's origin, so the march starts at minus this.
+    cloud_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
     def daylight(self) -> float:
@@ -444,7 +447,9 @@ def _cloud_terms(directions: np.ndarray, conditions: SkyConditions) -> Tuple[np.
     field = conditions.cloud
     assert field is not None
     origin = np.zeros(directions.shape, dtype=np.float64)
+    origin[..., 0] = -conditions.cloud_offset_m[0]
     origin[..., 1] = 2.0
+    origin[..., 2] = -conditions.cloud_offset_m[2]
 
     lit_by = conditions.sun if conditions.sun.elevation_deg > 0.0 else conditions.moon
     sun_direction = lit_by.direction() if lit_by.elevation_deg > 0.0 else None

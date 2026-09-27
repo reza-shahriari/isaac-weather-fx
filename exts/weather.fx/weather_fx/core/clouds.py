@@ -60,6 +60,9 @@ __all__ = [
     "cloud_field_from_state",
     "TilePlacement",
     "tile_placements",
+    "stage_to_field",
+    "volume_offset_m",
+    "drift_velocity_m_s",
 ]
 
 @dataclass(frozen=True)
@@ -553,6 +556,26 @@ class CloudField:
             tile_m=float(self.cells * self.cell_m),
         )
 
+    def optical_depth_toward(self, origin_m: Any, direction: Any, steps: int = 64) -> float:
+        """Visible optical depth from a point toward a direction (the field's frame, metres).
+
+        What decides whether the ground at ``origin_m`` is in a cloud's shadow: the sun's beam
+        reaching it is ``exp(-tau)`` of what it would be in clear air.
+        """
+        o = np.asarray(origin_m, dtype=np.float64).reshape(3)
+        d = np.asarray(direction, dtype=np.float64).reshape(3)
+        d = d / max(float(np.linalg.norm(d)), 1e-12)
+        if d[1] <= 1e-3 or self.cover <= 0.0:
+            return 0.0 if d[1] > 1e-3 else float("inf")
+        t0 = max((self.base_m - o[1]) / d[1], 0.0)
+        t1 = max((self.top_m - o[1]) / d[1], 0.0)
+        if t1 <= t0:
+            return 0.0
+        t = t0 + (np.arange(steps) + 0.5) / steps * (t1 - t0)
+        p = o[None, :] + t[:, None] * d[None, :]
+        rho = self.density(p[:, 0], p[:, 1], p[:, 2])
+        return float(rho.sum() * (t1 - t0) / steps * self.extinction_per_m)
+
     def column_optical_depth(self, x_m: Any = 0.0, z_m: Any = 0.0, samples: int = 64) -> Any:
         """Vertical optical depth through the column over ``(x, z)``. The overhead answer."""
         heights = self.base_m + (np.arange(samples) + 0.5) / samples * self.thickness_m
@@ -844,19 +867,21 @@ CLOUD_SHAPE_KEYS = (
 _FIELD_CACHE: Dict[Tuple[Any, ...], "CloudField"] = {}
 
 
-def cloud_field_from_state(state: Any):
+def cloud_field_from_state(state: Any, build: bool = True):
     """The cloud field a state describes, or ``None`` for a clear sky. Cached on its shape keys.
 
     A field of the default size takes seconds to synthesise, and the dome, the volume and any
     sensor model all want the same one: building it once per shape is the difference between a
     colour change being instant and it costing a rebuild. The cache holds the last two shapes.
+    ``build=False`` returns the cached field or ``None`` and never pays for one -- for callers on
+    the UI thread.
     """
     clouds = state.clouds
     if not (clouds.enabled and clouds.cover > 0.0):
         return None
     key = tuple(getattr(clouds, name) for name in CLOUD_SHAPE_KEYS)
     cached = _FIELD_CACHE.get(key)
-    if cached is not None:
+    if cached is not None or not build:
         return cached
     base = clouds.base_m
     if base <= 0.0:
@@ -910,3 +935,43 @@ def tile_placements(grid: VolumeGrid, tiles: int, up_axis: int = 1) -> list:
                 high_m=tuple(c + s for c, s in zip(grid.high_m, shift)),  # type: ignore[arg-type]
             ))
     return out
+
+
+def stage_to_field(point: Any, up_axis: int = 1) -> np.ndarray:
+    """A stage-axes position (metres) in the field's Y-up frame: the inverse of the dome's turn."""
+    p = np.asarray(point, dtype=np.float64)
+    if up_axis == 1:
+        return p.copy()
+    return np.stack([p[..., 0], p[..., 2], -p[..., 1]], axis=-1)
+
+
+def volume_offset_m(drift_m: Any, anchor_m: Any, tile_m: float, up_axis: int = 1) -> np.ndarray:
+    """Where to put the tiled volumes: the wind's drift, plus whole tiles to keep the anchor central.
+
+    The field is exactly periodic, so shifting the volumes by a whole tile changes nothing a camera
+    can see -- which is what lets them follow a camera across any distance with no rebuild and no
+    seam. The drift is the continuous part: the cloud blowing past. Both in stage axes, metres;
+    the vertical component is always zero.
+    """
+    drift = np.asarray(drift_m, dtype=np.float64)
+    anchor = np.asarray(anchor_m, dtype=np.float64)
+    offset = np.zeros(3)
+    for axis in ((0, 2) if up_axis == 1 else (0, 1)):
+        tiles = math.floor((anchor[axis] - drift[axis]) / tile_m + 0.5)
+        offset[axis] = drift[axis] + tiles * tile_m
+    return offset
+
+
+def drift_velocity_m_s(speed_mps: float, direction_deg: float, factor: float, up_axis: int = 1) -> np.ndarray:
+    """Horizontal cloud velocity in stage axes: the surface wind scaled to cloud level.
+
+    ``direction_deg`` follows the wind section's convention: the direction the wind blows
+    *toward*, from +X. Wind speed grows with height through the boundary layer, so cloud-level
+    wind is typically one and a half to two times the surface value; ``factor`` is that ratio.
+    """
+    a = math.radians(direction_deg)
+    v = np.zeros(3)
+    h0, h1 = (0, 2) if up_axis == 1 else (0, 1)
+    v[h0] = speed_mps * factor * math.cos(a)
+    v[h1] = speed_mps * factor * math.sin(a)
+    return v

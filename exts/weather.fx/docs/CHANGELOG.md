@@ -18,6 +18,13 @@
 - `core/clouds.cloud_field_from_state` (cached per cloud shape), `CloudField.volume_grid` (the
   density in stage axes, voxel for voxel the field) and `tile_placements`.
 - `examples/check_sky_and_clouds.py`: a Script Editor walkthrough of the new behaviour.
+- **Clouds drift with the wind** (`clouds.wind_factor`, 1.5 x the surface wind by default). The
+  manager integrates the drift in `step` (`context.cloud_drift_m`), so manual time is
+  deterministic; `WeatherController.cloud_drift_m()` hands it to sensor models that march the
+  field. Volumes move by one translate on `/WeatherFX/Clouds`, which also recentres them by whole
+  tiles so the camera never reaches an edge. The dome re-bakes every 250 m of drift.
+- **Cloud shadows under real-time** (`clouds.cast_shadow`): the sun is dimmed by the cloud's
+  transmittance toward it at the camera. The path tracer's volumes cast real shadows.
 - **A physically based atmosphere** (`core/atmosphere.py`), the technique behind Unreal's Sky
   Atmosphere (Hillaire 2020): transmittance, multiple-scattering and sky-view tables over a round
   planet, with Rayleigh, Mie and ozone. It is the new default (`sky.model = "atmosphere"`); the

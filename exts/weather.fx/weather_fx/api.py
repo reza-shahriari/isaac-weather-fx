@@ -170,6 +170,20 @@ class WeatherController:
         self._manager.set_state(WeatherState.from_dict(data))
 
     # ------------------------------------------------------------ time and anchoring
+    def cloud_drift_m(self, frame: str = "field"):
+        """How far the wind has carried the clouds, metres.
+
+        ``frame="field"`` gives it in the cloud field's own Y-up frame, which is what a sensor
+        model marching ``CloudField`` should subtract from its sample positions so its cloud sits
+        where the rendered one does. ``frame="stage"`` gives stage axes.
+        """
+        from .core.clouds import stage_to_field
+
+        drift = self._manager.context.cloud_drift_m
+        if frame == "stage":
+            return drift.copy()
+        return stage_to_field(drift, self._manager.context.up_axis())
+
     def step(self, dt: float) -> None:
         """Advance the simulation manually (use with general.time_source='manual')."""
         self._manager.step(dt)

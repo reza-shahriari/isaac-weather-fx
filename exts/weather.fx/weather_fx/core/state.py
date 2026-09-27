@@ -202,6 +202,14 @@ class CloudParams:
     density_scale: float = param(1.0, "Density", min=0.05, max=10.0, log_scale=True,
                                  tooltip="Multiplies the cloud's optical depth. Instant on "
                                          "volumes: it is a material input, not a rebuild.")
+    wind_factor: float = param(1.5, "Drift with wind", min=0.0, max=5.0,
+                               tooltip="Cloud speed as a multiple of the surface wind (wind "
+                                       "section). Wind strengthens with height, so 1.5-2 is "
+                                       "typical; 0 holds the clouds still.")
+    cast_shadow: bool = param(True, "Cloud shadows",
+                              tooltip="Real-time: dim the sun when a cloud is between it and the "
+                                      "camera. The path tracer's volumes cast real shadows "
+                                      "regardless.")
     cover: float = param(0.35, "Sky cover", min=0.0, max=1.0,
                          tooltip="Fraction of the sky the cloud hides. This is solved for, not "
                                  "approximated: ask for 0.45 and the field measures 0.45.")

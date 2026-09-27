@@ -80,6 +80,15 @@ async def main():
     await asyncio.sleep(3.0)
     wx.set_clouds(lit_color=(1.0, 1.0, 1.0), density_scale=1.0)
 
+    print("\n3b. wind: the clouds drift, and the volumes follow the camera")
+    wx.configure(wind={"speed_mps": 20.0, "direction_deg": 0.0}, clouds={"wind_factor": 2.0})
+    before = viewport_stats().get("cloud_volume", {}).get("offset")
+    await asyncio.sleep(3.0)
+    after = viewport_stats().get("cloud_volume", {}).get("offset")
+    print("   volume offset before/after 3 s:", before, after)
+    print("   -> expect it to have moved ~120 m along +X (in stage units), clouds visibly drifting")
+    wx.configure(wind={"speed_mps": 0.0})
+
     print("\n4. real-time: clouds go into the dome")
     settings.set("/rtx/rendermode", "RaytracedLighting")
     await wait_until(lambda: viewport_stats().get("cloud_volume", {}).get("tiles", 1) == 0,
@@ -89,7 +98,9 @@ async def main():
     await wait_until(lambda: not viewport_stats().get("sky", {}).get("baking", False),
                      180, "the dome bake")
     print("   sky:", {k: viewport_stats()["sky"].get(k)
-                      for k in ("cloud_cover_in_dome", "texture", "sun_elevation_deg")})
+                      for k in ("cloud_cover_in_dome", "texture", "sun_elevation_deg",
+                                "sun_through_cloud")})
+    print("   -> sun_through_cloud below 1 means a dome cloud is shading the camera")
     print("   -> expect the app to have stayed responsive while it baked, then clouds in the sky")
 
     print("\n5. sky off: everything restored")

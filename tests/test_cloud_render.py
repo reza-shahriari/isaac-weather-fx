@@ -155,3 +155,62 @@ def test_the_shadow_colour_tints_the_cloud_and_not_the_clear_sky():
     # Where anything changed, it lost green and blue, not red.
     assert (red[changed][:, 1] <= base[changed][:, 1] + 1e-6).all()
     assert np.allclose(red[changed][:, 0], base[changed][:, 0], rtol=1e-4)
+
+
+# --- drift, recentring and shadow -------------------------------------------------------------
+
+from weather_fx.core.clouds import drift_velocity_m_s, stage_to_field, volume_offset_m  # noqa: E402
+
+
+@pytest.mark.parametrize("up_axis", [1, 2])
+def test_the_volumes_follow_the_camera_by_whole_tiles_and_keep_it_central(up_axis):
+    tile = 15_360.0
+    horizontal = (0, 2) if up_axis == 1 else (0, 1)
+    drift = np.zeros(3)
+    drift[horizontal[0]] = 1234.0
+    for x in (0.0, 7_000.0, 8_000.0, 50_000.0, -123_456.0):
+        anchor = np.zeros(3)
+        anchor[horizontal[0]] = x
+        anchor[horizontal[1]] = -0.4 * x
+        offset = volume_offset_m(drift, anchor, tile, up_axis)
+        # The camera is inside the central tile ...
+        assert np.all(np.abs((anchor - offset)[list(horizontal)]) <= 0.5 * tile + 1e-6)
+        # ... and the shift beyond the drift is whole tiles, so the cloud looks unchanged.
+        extra = (offset - drift)[list(horizontal)] / tile
+        assert np.allclose(extra, np.round(extra))
+        assert offset[up_axis] == 0.0
+
+
+def test_clouds_drift_downwind_at_the_cloud_level_speed():
+    v = drift_velocity_m_s(10.0, 90.0, 1.5, up_axis=2)
+    np.testing.assert_allclose(v, [0.0, 15.0, 0.0], atol=1e-9)
+    assert np.all(drift_velocity_m_s(10.0, 0.0, 0.0) == 0.0)
+
+
+def test_a_sun_behind_a_cloud_is_dimmed_and_a_clear_one_is_not():
+    field = _field()
+    sun = np.array([0.0, 1.0, 0.0])
+    # Find a column that is cloudy and one that is clear, straight up.
+    xs = np.linspace(-1500.0, 1500.0, 61)
+    taus = [field.optical_depth_toward((x, 1.5, 0.0), sun) for x in xs]
+    assert max(taus) > 1.0 and min(taus) == 0.0
+    assert field.optical_depth_toward((0.0, 1.5, 0.0), (1.0, -0.2, 0.0)) == float("inf")
+
+
+def test_stage_to_field_inverts_the_z_up_turn():
+    p = np.array([1.0, 2.0, 3.0])
+    np.testing.assert_allclose(stage_to_field(p, 1), p)
+    np.testing.assert_allclose(stage_to_field(p, 2), [1.0, 3.0, -2.0])
+
+
+def test_drifting_the_dome_by_a_whole_tile_changes_nothing():
+    """The dome march honours the drift, and the field's period makes a full tile invisible."""
+    from dataclasses import replace
+
+    conditions = conditions_from_state(_cloudy())
+    tile = conditions.cloud.cells * conditions.cloud.cell_m
+    still = environment_map(conditions, height=32)
+    moved = environment_map(replace(conditions, cloud_offset_m=(tile, 0.0, 0.0)), height=32)
+    half = environment_map(replace(conditions, cloud_offset_m=(0.5 * tile, 0.0, 0.0)), height=32)
+    np.testing.assert_allclose(moved, still, rtol=1e-4, atol=1e-6)
+    assert not np.allclose(half, still, rtol=1e-3)

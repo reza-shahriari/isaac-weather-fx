@@ -15,6 +15,10 @@ class WeatherContext:
     def __init__(self, manager):
         self._manager = manager
         self.anchor_provider: Optional[Callable[[], object]] = None
+        #: How far the wind has carried the cloud field, stage axes, **metres**. Advanced by the
+        #: manager's step, so manual time drives it deterministically. Every consumer of the
+        #: cloud (the volumes, the dome, the sun's shadow, a sensor model) offsets by this.
+        self.cloud_drift_m = np.zeros(3)
 
     # ---------------------------------------------------------------- stage
     @staticmethod

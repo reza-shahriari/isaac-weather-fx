@@ -11,6 +11,11 @@ mesh box whose vertices sit at the grid's world bounds with **no transform**, ma
 ``primvars:isVolume``, bound to ``OmniVolumeDensity`` with the file on ``volume_density_texture``,
 plus the path tracer's non-uniform-volume settings. Each clause was found by its failure.
 
+**The clouds move and never run out.** The boxes have no transform of their own; their parent,
+``/WeatherFX/Clouds``, carries one translate: the wind's drift (``context.cloud_drift_m``) plus
+whole tiles chosen to keep the camera in the central tile. The field is periodic, so a whole-tile
+jump is invisible, and a translate carries the texture with the box -- only a *scale* stretches it.
+
 **Nothing slow runs on the UI thread.** Building the field and writing the files happens in a
 worker; the prims are authored from ``update`` when it finishes, and the previous clouds stay up
 until then. Colour, density and forward scattering are material inputs and change instantly. With
@@ -25,7 +30,14 @@ import pathlib
 import tempfile
 from typing import Any, List, Optional, Set
 
-from ...core.clouds import CLOUD_SHAPE_KEYS, cloud_field_from_state, tile_placements
+import numpy as np
+
+from ...core.clouds import (
+    CLOUD_SHAPE_KEYS,
+    cloud_field_from_state,
+    tile_placements,
+    volume_offset_m,
+)
 from ...core.jobs import LatestJob
 from ..base import Effect
 from .render_mode import RenderModeWatcher, cloud_path
@@ -68,6 +80,8 @@ class CloudVolumeEffect(Effect):
         self._settings: dict = {}
         self._active = False
         self._voxels = 0
+        self._tile_m = 0.0
+        self._placed = None
 
     # --- lifecycle ---------------------------------------------------------------------
 
@@ -107,6 +121,7 @@ class CloudVolumeEffect(Effect):
     def update(self, dt: float, t: float) -> None:
         if self._watcher is not None and self._watcher.changed():
             self.apply_state(self.context.state, {"clouds"})
+        self._place()
         try:
             done = self._job.poll()
         except Exception:
@@ -131,6 +146,7 @@ class CloudVolumeEffect(Effect):
             "tiles": len(self._files),
             "active_voxels": self._voxels,
             "extinction_per_m": round(self._extinction_per_m, 6),
+            "offset": None if self._placed is None else [round(float(v), 2) for v in self._placed],
             "building": self._job.busy,
         }
 
@@ -155,11 +171,44 @@ class CloudVolumeEffect(Effect):
                 for tile in result["tiles"]
             ]
         self._files = list(result["files"])
+        self._tile_m = float(result["tile_m"])
+        self._placed = None
+        self._place()
         self._extinction_per_m = float(result["extinction_per_m"])
         self._voxels = int(result["voxels"])
         self._built_key = key
         _remove_files([f for f in previous if f not in self._files])
         self._update_materials(stage, state)
+
+    def _place(self) -> None:
+        """Move the volumes: the wind's drift, plus whole tiles to keep the camera in the middle.
+
+        One translate on the root, so it costs nothing per frame. It is a translation only: the
+        density texture is read in the box's local frame, so a translate carries the cloud with
+        the box, where a scale would stretch the texture (ADR 0144's failure was a scale).
+        """
+        if not self._shaders or self._tile_m <= 0.0:
+            return
+        stage = self.context.stage()
+        if stage is None:
+            return
+        mpu = self.context.meters_per_unit()
+        up_axis = self.context.up_axis()
+        anchor_m = np.asarray(self.context.anchor(), dtype=np.float64) * mpu
+        offset = volume_offset_m(self.context.cloud_drift_m, anchor_m, self._tile_m, up_axis) / mpu
+        if self._placed is not None and np.allclose(offset, self._placed, atol=1e-3):
+            return
+        from pxr import Gf, Usd, UsdGeom
+
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            prim = stage.GetPrimAtPath(CLOUDS_ROOT)
+            if not prim:
+                return
+            xform = UsdGeom.Xformable(prim)
+            ops = xform.GetOrderedXformOps()
+            op = ops[0] if ops else xform.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble)
+            op.Set(Gf.Vec3d(*(float(v) for v in offset)))
+        self._placed = offset
 
     def _update_materials(self, stage: Any, state: Any) -> None:
         """Colour, density and phase: material inputs, so they never cost a rebuild."""
@@ -268,7 +317,7 @@ def _build_volumes(state: Any, up_axis: int, mpu: float, directory: pathlib.Path
             "low": tuple(c * to_units for c in placement.low_m),
             "high": tuple(c * to_units for c in placement.high_m),
         })
-    return {"tiles": tiles, "files": files, "voxels": voxels,
+    return {"tiles": tiles, "files": files, "voxels": voxels, "tile_m": grid.tile_m,
             "extinction_per_m": field.extinction_per_m}
 
 

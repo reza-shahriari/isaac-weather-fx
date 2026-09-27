@@ -148,11 +148,23 @@ class SkyParams:
     turbidity: float = param(2.8, "Turbidity", min=1.8, max=10.0,
                              tooltip="Linke turbidity: 2 is a very clear day, 6 is hazy, 10 is "
                                      "industrial murk. Drives the sky's colour and its brightness.")
+    model: str = param("atmosphere", "Sky model", choices=("atmosphere", "preetham"), advanced=True,
+                       tooltip="atmosphere: physically based scattering over a round planet "
+                               "(Hillaire 2020, the model behind Unreal's Sky Atmosphere). "
+                               "preetham: the older analytic fit, kept for comparison.")
+    horizon_blend_deg: float = param(4.0, "Horizon blend", min=0.0, max=20.0, unit="deg",
+                                     tooltip="How far below the horizon the dome's ground fades "
+                                             "into the sky. 0 is the bare model: a sharp line "
+                                             "five kilometres away.")
     ground_albedo: Vec3 = param((0.16, 0.17, 0.12), "Ground albedo", min=0.0, max=1.0,
                                 widget="color", advanced=True)
     exposure_scale: float = param(1.0, "Exposure", min=0.05, max=20.0, log_scale=True,
                                   tooltip="Multiplies the dome and both lights together, so the "
                                           "relative brightness of sky, sun and moon is preserved.")
+    aerial_perspective: bool = param(True, "Distance haze",
+                                     tooltip="With fog off, fade distant geometry into the sky's "
+                                             "horizon colour at the visibility the turbidity "
+                                             "implies. Fog, when on, takes over.")
     hide_scene_lights: bool = param(True, "Hide scene lights",
                                     tooltip="While the sky is on, hide every light outside "
                                             "/WeatherFX (the stage's default light and dome), so "

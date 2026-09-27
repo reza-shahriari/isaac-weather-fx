@@ -18,6 +18,7 @@ class FogEffect(Effect):
         self._missing = set()
         self._active = False
         self._beta = 0.0
+        self._mode = None  # "fog", "haze" or None
 
     def _settings(self):
         import carb.settings
@@ -42,9 +43,18 @@ class FogEffect(Effect):
 
     def apply_state(self, state, changed):
         fog = state.fog
-        if not (state.general.enabled and fog.enabled):
+        if not state.general.enabled:
             self._restore()
             return
+        if fog.enabled:
+            self._apply_fog(fog)
+        elif state.sky.enabled and state.sky.aerial_perspective:
+            if self._mode != "haze" or {"sky", "fog", "general"} & set(changed):
+                self._apply_haze(state)
+        else:
+            self._restore()
+
+    def _apply_fog(self, fog):
         mpu = self.context.meters_per_unit()
         self._beta = extinction_from_visibility(fog.visibility_m)
         density = self._beta * mpu * fog.density_calibration  # per stage unit
@@ -60,10 +70,45 @@ class FogEffect(Effect):
         self._write("height_density", float(fog.height_density if fog.height_fog else 0.0))
         self._write("height_falloff", float(fog.height_falloff))
         self._active = True
+        self._mode = "fog"
+
+    def _apply_haze(self, state):
+        """Aerial perspective: the sky's own haze on the stage's geometry.
+
+        With no fog asked for, distant objects should still fade into the horizon the way they do
+        in the sky above them -- otherwise a building two kilometres away is as crisp as one at
+        twenty metres and meets the dome's hazy horizon at a hard edge. The extinction is the
+        visibility the turbidity implies (the same number an infrared model scales its aerosol
+        from) and the colour is the sky's own horizon.
+        """
+        from ...core.atmosphere import atmosphere_for, haze_visibility_m, sky_view
+        from ...core.sky import conditions_from_state
+
+        sky = state.sky
+        conditions = conditions_from_state(state, build_cloud=False)
+        atm = atmosphere_for(sky.turbidity, sky.ground_albedo)
+        # Half-degree steps: the colour changes slowly, and a table per step is cached.
+        elevation = round(max(conditions.sun.elevation_deg, -18.0) * 2.0) / 2.0
+        colour = sky_view(atm, elevation).horizon_colour()
+        peak = float(max(colour.max(), 1e-12))
+
+        mpu = self.context.meters_per_unit()
+        self._beta = extinction_from_visibility(haze_visibility_m(sky.turbidity))
+        self._write("enabled", True)
+        self._write("color", tuple(float(c) / peak for c in colour))
+        self._write("color_intensity", 1.0)
+        self._write("z_up", self.context.up_axis() == 2)
+        self._write("start_distance", 0.0)
+        self._write("end_distance", 200_000.0 / mpu)
+        self._write("distance_density", float(self._beta * mpu * state.fog.density_calibration))
+        self._write("height_density", 0.0)
+        self._active = True
+        self._mode = "haze"
 
     def _restore(self):
         if not self._originals:
             self._active = False
+            self._mode = None
             return
         settings = self._settings()
         for path, value in self._originals.items():
@@ -76,6 +121,7 @@ class FogEffect(Effect):
                 log.exception("weather_fx: could not restore %s", path)
         self._originals.clear()
         self._active = False
+        self._mode = None
 
     def detach(self):
         self._restore()
@@ -83,5 +129,5 @@ class FogEffect(Effect):
     def stats(self):
         if not self._active:
             return {"active": False}
-        return {"active": True, "extinction_per_m": round(self._beta, 6),
+        return {"active": True, "mode": self._mode, "extinction_per_m": round(self._beta, 6),
                 "missing_settings": sorted(self._missing)}

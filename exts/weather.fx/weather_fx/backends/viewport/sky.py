@@ -68,7 +68,7 @@ class SkyEffect(Effect):
     #: Which parameters the baked texture depends on. A change to anything else -- the sun's
     #: intensity scale, say -- re-aims the lights without paying for a rebake.
     _BAKE_KEYS = (
-        ("sky", ("latitude_deg", "longitude_deg", "date_utc", "hour_utc", "turbidity",
+        ("sky", ("model", "horizon_blend_deg", "latitude_deg", "longitude_deg", "date_utc", "hour_utc", "turbidity",
                  "ground_albedo", "star_intensity", "dome_resolution")),
         ("clouds", ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c",
                     "thickness_m", "optical_depth", "feature_m", "cells", "levels", "cell_m",

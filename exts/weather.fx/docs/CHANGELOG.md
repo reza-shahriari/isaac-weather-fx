@@ -3,6 +3,26 @@
 ## [Unreleased]
 
 ### Added
+- **A physically based atmosphere** (`core/atmosphere.py`), the technique behind Unreal's Sky
+  Atmosphere (Hillaire 2020): transmittance, multiple-scattering and sky-view tables over a round
+  planet, with Rayleigh, Mie and ozone. It is the new default (`sky.model = "atmosphere"`); the
+  Preetham fit stays selectable. Twilight comes from the geometry, the horizon brightens because a
+  grazing ray crosses a thousand kilometres of air, and the ground below the horizon is seen
+  through the same air. A clear sky builds in about 0.2 s once the tables are cached.
+- `sky.horizon_blend_deg`: fades the dome's ground into the sky over a band below the horizon,
+  replacing the hard line at the observer's five-kilometre geometric horizon.
+- `sky.aerial_perspective` (on by default): with fog off, RTX fog is driven by the sky's own haze,
+  at the visibility the turbidity implies (`atmosphere.haze_visibility_m`) and in the sky's horizon
+  colour, so distant geometry fades the way the sky does.
+- `sky.hide_scene_lights` (on by default): while the sky is authored, every light outside
+  `/WeatherFX` is hidden in the session layer, and restored on detach. A new stage's
+  `defaultLight` was a second sun.
+
+### Changed
+- The dome exposure is re-anchored on the atmosphere's clear-noon 99th percentile (16,000 cd/m2,
+  target 400), which keeps the measured clear-noon dome intensity of 0.025.
+
+### Added (earlier)
 - **A rendered gallery** (`captures/gallery/`) and the script that produces it,
   `examples/capture_gallery.py`. Thirteen scenarios, two cameras, one stage with **no lights** —
   every photon comes from the sky this extension authors. The clocks are solved from the

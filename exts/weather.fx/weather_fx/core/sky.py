@@ -48,6 +48,7 @@ from weather_fx.core.celestial import (
     moon_position,
     sun_position,
 )
+from weather_fx.core import atmosphere
 from weather_fx.core.clouds import CloudField, cloud_profile, lifting_condensation_level_m
 from weather_fx.core.meteorology import beam_tint
 
@@ -191,6 +192,11 @@ class SkyConditions:
     #: Samples per ray in the cloud march. Carried here rather than read from the state at the
     #: march, so every consumer of one `SkyConditions` integrates the cloud identically.
     march_steps: int = 64
+    #: "atmosphere" (Hillaire 2020, :mod:`weather_fx.core.atmosphere`) or "preetham" (the 1999
+    #: analytic fit, kept for comparison and for anything calibrated against it).
+    model: str = "atmosphere"
+    #: Degrees below the horizon over which the dome's ground fades into the sky (atmosphere only).
+    horizon_blend_deg: float = 4.0
 
     @property
     def daylight(self) -> float:
@@ -263,6 +269,8 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         star_intensity=float(sky.star_intensity),
         exposure_scale=float(sky.exposure_scale),
         march_steps=int(clouds.march_steps),
+        model=str(getattr(sky, "model", "atmosphere")),
+        horizon_blend_deg=float(getattr(sky, "horizon_blend_deg", 4.0)),
     )
 
 
@@ -310,6 +318,8 @@ def sky_radiance_rgb(directions: Any, conditions: SkyConditions) -> np.ndarray:
     environment map being a black hemisphere the dome then lights the scene with.
     """
     d = np.asarray(directions, dtype=np.float64)
+    if conditions.model == "atmosphere":
+        return _atmosphere_radiance_rgb(d, conditions)
     up = d[..., 1]
 
     total = np.zeros(d.shape, dtype=np.float64)
@@ -359,6 +369,69 @@ def sky_radiance_rgb(directions: Any, conditions: SkyConditions) -> np.ndarray:
     return np.clip(total * conditions.exposure_scale, 0.0, None)
 
 
+def _relative_azimuth(directions: np.ndarray, body: BodyPosition) -> np.ndarray:
+    toward = body.direction()
+    return np.arctan2(directions[..., 2], directions[..., 0]) - math.atan2(toward[2], toward[0])
+
+
+def _atmosphere_radiance_rgb(d: np.ndarray, conditions: SkyConditions) -> np.ndarray:
+    """The sky from :mod:`weather_fx.core.atmosphere`: sun, moon and stars through one medium.
+
+    The ground below the horizon comes out of the same march -- lit terrain seen through the air
+    in front of it -- so there is no separate ground model and no seam to hide.
+    """
+    atm = atmosphere.atmosphere_for(conditions.turbidity, conditions.ground_albedo)
+    elevation = np.arcsin(np.clip(d[..., 1], -1.0, 1.0))
+    total = np.zeros(d.shape, dtype=np.float64)
+
+    # The dome's ground is everything beyond the stage, seen from two metres up -- a geometric
+    # horizon five kilometres away, too close for any haze, so the model alone draws a hard line
+    # there. Real terrain has relief and depth, so its far edge melts into the sky: fade the
+    # ground rows into the sky just above the horizon in the same direction, over a band.
+    blend = math.radians(max(conditions.horizon_blend_deg, 0.0))
+
+    def sample(view: "atmosphere.SkyView", relative_azimuth: np.ndarray) -> np.ndarray:
+        values = view.radiance(elevation, relative_azimuth)
+        if blend <= 0.0:
+            return values
+        depth = view.horizon_elevation - elevation
+        below = depth > 0.0
+        if not np.any(below):
+            return values
+        x = np.clip(depth[below] / blend, 0.0, 1.0)
+        weight = (x * x * (3.0 - 2.0 * x))[..., None]  # smoothstep: 0 at the horizon, 1 past the band
+        sky = view.radiance(np.full(x.shape, view.horizon_elevation + 1e-3),
+                            relative_azimuth[below])
+        values = np.array(values)
+        values[below] = sky * (1.0 - weight) + values[below] * weight
+        return values
+
+    sun = conditions.sun
+    # Below about -18 degrees nothing of the sun reaches even the upper air.
+    if sun.elevation_deg > -18.0:
+        view = atmosphere.sky_view(atm, sun.elevation_deg)
+        total += sample(view, _relative_azimuth(d, sun)) * atmosphere.SOLAR_ILLUMINANCE_LUX
+
+    moon = conditions.moon
+    if moon.is_up and conditions.moon_lux > 0.0:
+        view = atmosphere.sky_view(atm, moon.elevation_deg)
+        # `moon_lux` is the horizontal illuminance at the ground; the table wants it at the top of
+        # the air, at normal incidence.
+        mu = math.sin(math.radians(max(moon.elevation_deg, 1.0)))
+        t_ground = float(atmosphere.transmittance_to_space(0.0, mu, atm)[1])
+        source = conditions.moon_lux / (mu * max(t_ground, 1e-3))
+        total += (sample(view, _relative_azimuth(d, moon)) * source
+                  * np.asarray(MOONLIGHT_TINT))
+
+    total += STARLIGHT_LUX * conditions.star_intensity / math.pi * np.asarray(MOONLIGHT_TINT)
+
+    if conditions.cloud is not None:
+        above = d[..., 1] > 0.0
+        if np.any(above):
+            total[above] = _composite_cloud(d[above], total[above], conditions)
+    return np.clip(total * conditions.exposure_scale, 0.0, None)
+
+
 def _composite_cloud(
     directions: np.ndarray, sky: np.ndarray, conditions: SkyConditions
 ) -> np.ndarray:
@@ -397,12 +470,15 @@ def _composite_cloud(
 
 #: Renderer-side level the *brightest part of the sky* is exposed to, in the units an RTX dome
 #: light's `intensity` multiplies its texture by. Measured by sweeping the intensity on a demo
-#: stage: a clear midday sky's 99th percentile sits near 20,000 cd/m2 and renders correctly at an
-#: intensity near 0.025, which puts that percentile at 500.
-DOME_HIGHLIGHT_TARGET = 500.0
+#: stage: a clear midday sky renders correctly at an intensity near 0.025 -- which also sets the
+#: sun, exposed by the same factor, and so the brightness of sunlit ground. Re-anchored when the
+#: default model became the physical atmosphere so that intensity is unchanged: 0.025 times the
+#: atmosphere's clear-noon 99th percentile below.
+DOME_HIGHLIGHT_TARGET = 400.0
 #: The 99th-percentile luminance of a clear midday sky, cd/m2 -- the anchor the adaptation is
-#: written about. Measured from this model at a 58 degree sun.
-DAYLIGHT_REFERENCE_CD_M2 = 20_000.0
+#: written about. Measured from the atmosphere model at a 65 degree sun, turbidity 2.1 (the
+#: Preetham fit put it at 20,000: its sky is brighter away from the sun and has no aureole).
+DAYLIGHT_REFERENCE_CD_M2 = 16_000.0
 #: How completely the exposure adapts to the scene. **A tone decision, stated rather than hidden.**
 #: The sky spans seven decades between noon and a moonless night and a display spans two, so
 #: something has to compress it: 1.0 exposes every frame to the same brightness and a moonlit

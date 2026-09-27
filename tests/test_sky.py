@@ -302,8 +302,10 @@ def _sky_at(hour, *, cover=0.0, turbidity=2.6, date="2024-06-21", height=128, se
 
 
 def test_a_clear_midday_sky_is_exposed_where_the_measurement_put_it():
-    """The anchor. A clear day's 99th percentile lands on the target by construction, and its
-    median lands near 300 -- the value the intensity sweep on a demo stage actually produced."""
+    """The anchor. A clear day's 99th percentile lands on the target by construction, and the
+    dome intensity is the 0.025 the sweep on a demo stage found. The median sits lower than the
+    Preetham fit's (about 130 against 300): a physical sky is dim away from the sun next to its
+    aureole, and sunlit ground, not the sky's median, is what the calibration holds fixed."""
     from weather_fx.core.sky import DOME_HIGHLIGHT_TARGET, dome_exposure, latlong_directions
 
     image = _sky_at(12.97, turbidity=2.1)
@@ -312,7 +314,8 @@ def test_a_clear_midday_sky_is_exposed_where_the_measurement_put_it():
     assert float(np.percentile(luminance, 99.0)) * exposure == pytest.approx(
         DOME_HIGHLIGHT_TARGET, rel=0.02
     )
-    assert 200.0 < float(np.median(luminance)) * exposure < 420.0
+    assert exposure == pytest.approx(0.025, rel=0.05)
+    assert 100.0 < float(np.median(luminance)) * exposure < 250.0
 
 
 def test_a_sunset_does_not_clip_the_way_a_median_meter_made_it():
@@ -337,8 +340,8 @@ def test_civil_twilight_does_not_run_the_exposure_to_its_clamp():
     image = _sky_at(20.5, cover=0.3, turbidity=3.0)
     luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
     peak = float(np.percentile(luminance, 99.0))
-    # The trap is real: half the sky is unlit, so the median is five orders below the highlights.
-    assert float(np.median(luminance)) < 1e-5 * peak
+    # The trap is real: the median is orders of magnitude below the highlights.
+    assert float(np.median(luminance)) < 1e-2 * peak
     rendered = peak * dome_exposure(image)
     assert 50.0 < rendered < 450.0
 

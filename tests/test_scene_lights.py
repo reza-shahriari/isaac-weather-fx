@@ -1,0 +1,17 @@
+from weather_fx.backends.viewport.scene_lights import is_own_prim
+from weather_fx.core.state import WeatherState
+
+
+def test_own_prims_are_the_root_and_its_children_only():
+    assert is_own_prim("/WeatherFX")
+    assert is_own_prim("/WeatherFX/Sky/Sun")
+    # A sibling whose name merely starts with the root is somebody else's light.
+    assert not is_own_prim("/WeatherFXLights/Key")
+    assert not is_own_prim("/Environment/defaultLight")
+
+
+def test_scene_lights_are_hidden_by_default_and_can_be_kept():
+    state = WeatherState()
+    assert state.sky.hide_scene_lights is True
+    kept = state.with_updates("sky", hide_scene_lights=False)
+    assert kept.sky.hide_scene_lights is False

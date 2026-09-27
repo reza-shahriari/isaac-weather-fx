@@ -45,6 +45,7 @@ from ...core.sky import (
     environment_map,
 )
 from ..base import Effect
+from .scene_lights import SceneLightSuppressor
 
 log = logging.getLogger("weather_fx")
 
@@ -81,6 +82,7 @@ class SkyEffect(Effect):
         self._conditions: Optional[SkyConditions] = None
         self._authored = False
         self._exposure = 1.0
+        self._scene_lights = SceneLightSuppressor()
 
     # --- lifecycle ---------------------------------------------------------------------
 
@@ -103,6 +105,11 @@ class SkyEffect(Effect):
         assert self._conditions is not None
         self._author(stage, state, self._conditions)
         self._authored = True
+        if state.sky.hide_scene_lights:
+            # A change to the sky section itself is the moment to catch lights added since.
+            self._scene_lights.suppress(stage, rescan="sky" in changed and rebake)
+        else:
+            self._scene_lights.restore()
 
     def update(self, dt: float, t: float) -> None:
         """Advance the clock, if the state asks for it.
@@ -121,6 +128,10 @@ class SkyEffect(Effect):
         state.sky.hour_utc = (state.sky.hour_utc + hours) % 24.0
 
     def detach(self) -> None:
+        try:
+            self._scene_lights.restore()
+        except Exception:
+            log.exception("weather_fx: could not restore the scene lights")
         stage = self.context.stage() if hasattr(self, "context") else None
         if stage is not None:
             try:
@@ -140,6 +151,7 @@ class SkyEffect(Effect):
         conditions = self._conditions
         return {
             "authored": self._authored,
+            "scene_lights_hidden": self._scene_lights.hidden_count,
             "utc": conditions.when.isoformat(),
             "sun_elevation_deg": round(conditions.sun.elevation_deg, 2),
             "sun_azimuth_deg": round(conditions.sun.azimuth_deg, 2),

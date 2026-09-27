@@ -153,6 +153,11 @@ class SkyParams:
     exposure_scale: float = param(1.0, "Exposure", min=0.05, max=20.0, log_scale=True,
                                   tooltip="Multiplies the dome and both lights together, so the "
                                           "relative brightness of sky, sun and moon is preserved.")
+    hide_scene_lights: bool = param(True, "Hide scene lights",
+                                    tooltip="While the sky is on, hide every light outside "
+                                            "/WeatherFX (the stage's default light and dome), so "
+                                            "there is one sun. Session layer only; restored when "
+                                            "the sky is turned off.")
     sun_enabled: bool = param(True, "Sun light")
     moon_enabled: bool = param(True, "Moon light",
                                tooltip="The only thing that lights an outdoor night scene.")

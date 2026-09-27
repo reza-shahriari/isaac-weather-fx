@@ -48,7 +48,8 @@ from weather_fx.core.celestial import (
     moon_position,
     sun_position,
 )
-from weather_fx.core.clouds import CloudField, cloud_profile, lifting_condensation_level_m
+from weather_fx.core import atmosphere
+from weather_fx.core.clouds import CloudField, cloud_field_from_state
 from weather_fx.core.meteorology import beam_tint
 
 __all__ = [
@@ -61,6 +62,9 @@ __all__ = [
     "sky_luminance_cd_m2",
     "sky_radiance_rgb",
     "dome_exposure",
+    "scene_illuminant",
+    "sun_colour",
+    "white_balance_gains",
     "environment_map",
 ]
 
@@ -191,6 +195,21 @@ class SkyConditions:
     #: Samples per ray in the cloud march. Carried here rather than read from the state at the
     #: march, so every consumer of one `SkyConditions` integrates the cloud identically.
     march_steps: int = 64
+    #: "atmosphere" (Hillaire 2020, :mod:`weather_fx.core.atmosphere`) or "preetham" (the 1999
+    #: analytic fit, kept for comparison and for anything calibrated against it).
+    model: str = "atmosphere"
+    #: Degrees below the horizon over which the dome's ground fades into the sky (atmosphere only).
+    horizon_blend_deg: float = 4.0
+    #: Colour of the sunlit and of the self-shadowed parts of a cloud, as multipliers.
+    cloud_lit_colour: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    cloud_shadow_colour: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    #: Rows of the latitude-longitude grid the cloud is marched on before being upsampled into the
+    #: environment map. The march is the whole cost of a cloudy bake and a cloud's edges are soft,
+    #: so a quarter of the map's rows loses little and costs a sixteenth.
+    cloud_rows: int = 256
+    #: How far the wind has carried the cloud field, in its own Y-up frame, metres. The observer
+    #: sits at the field's origin, so the march starts at minus this.
+    cloud_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     @property
     def daylight(self) -> float:
@@ -233,25 +252,7 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         ) from exc
     when = day + timedelta(hours=float(sky.hour_utc))
 
-    field = None
-    if build_cloud and clouds.enabled and clouds.cover > 0.0:
-        base = clouds.base_m
-        if base <= 0.0:
-            base = lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
-        field = CloudField(
-            cover=float(clouds.cover),
-            base_m=float(base),
-            profile=cloud_profile(clouds.genus),
-            cell_m=float(clouds.cell_m),
-            cells=int(clouds.cells),
-            levels=int(clouds.levels),
-            seed=int(clouds.seed),
-            thickness_m=float(clouds.thickness_m),
-            optical_depth=float(clouds.optical_depth),
-            feature_m=float(clouds.feature_m),
-            erosion_scale=float(clouds.erosion_scale),
-            beta_scale=float(clouds.beta_scale),
-        )
+    field = cloud_field_from_state(state) if build_cloud else None
 
     return SkyConditions(
         when=when,
@@ -263,6 +264,11 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         star_intensity=float(sky.star_intensity),
         exposure_scale=float(sky.exposure_scale),
         march_steps=int(clouds.march_steps),
+        model=str(getattr(sky, "model", "atmosphere")),
+        horizon_blend_deg=float(getattr(sky, "horizon_blend_deg", 4.0)),
+        cloud_lit_colour=tuple(getattr(clouds, "lit_color", (1.0, 1.0, 1.0))),
+        cloud_shadow_colour=tuple(getattr(clouds, "shadow_color", (1.0, 1.0, 1.0))),
+        cloud_rows=int(getattr(clouds, "dome_rows", 256)),
     )
 
 
@@ -310,6 +316,8 @@ def sky_radiance_rgb(directions: Any, conditions: SkyConditions) -> np.ndarray:
     environment map being a black hemisphere the dome then lights the scene with.
     """
     d = np.asarray(directions, dtype=np.float64)
+    if conditions.model == "atmosphere":
+        return _atmosphere_radiance_rgb(d, conditions)
     up = d[..., 1]
 
     total = np.zeros(d.shape, dtype=np.float64)
@@ -359,6 +367,69 @@ def sky_radiance_rgb(directions: Any, conditions: SkyConditions) -> np.ndarray:
     return np.clip(total * conditions.exposure_scale, 0.0, None)
 
 
+def _relative_azimuth(directions: np.ndarray, body: BodyPosition) -> np.ndarray:
+    toward = body.direction()
+    return np.arctan2(directions[..., 2], directions[..., 0]) - math.atan2(toward[2], toward[0])
+
+
+def _atmosphere_radiance_rgb(d: np.ndarray, conditions: SkyConditions) -> np.ndarray:
+    """The sky from :mod:`weather_fx.core.atmosphere`: sun, moon and stars through one medium.
+
+    The ground below the horizon comes out of the same march -- lit terrain seen through the air
+    in front of it -- so there is no separate ground model and no seam to hide.
+    """
+    atm = atmosphere.atmosphere_for(conditions.turbidity, conditions.ground_albedo)
+    elevation = np.arcsin(np.clip(d[..., 1], -1.0, 1.0))
+    total = np.zeros(d.shape, dtype=np.float64)
+
+    # The dome's ground is everything beyond the stage, seen from two metres up -- a geometric
+    # horizon five kilometres away, too close for any haze, so the model alone draws a hard line
+    # there. Real terrain has relief and depth, so its far edge melts into the sky: fade the
+    # ground rows into the sky just above the horizon in the same direction, over a band.
+    blend = math.radians(max(conditions.horizon_blend_deg, 0.0))
+
+    def sample(view: "atmosphere.SkyView", relative_azimuth: np.ndarray) -> np.ndarray:
+        values = view.radiance(elevation, relative_azimuth)
+        if blend <= 0.0:
+            return values
+        depth = view.horizon_elevation - elevation
+        below = depth > 0.0
+        if not np.any(below):
+            return values
+        x = np.clip(depth[below] / blend, 0.0, 1.0)
+        weight = (x * x * (3.0 - 2.0 * x))[..., None]  # smoothstep: 0 at the horizon, 1 past the band
+        sky = view.radiance(np.full(x.shape, view.horizon_elevation + 1e-3),
+                            relative_azimuth[below])
+        values = np.array(values)
+        values[below] = sky * (1.0 - weight) + values[below] * weight
+        return values
+
+    sun = conditions.sun
+    # Below about -18 degrees nothing of the sun reaches even the upper air.
+    if sun.elevation_deg > -18.0:
+        view = atmosphere.sky_view(atm, sun.elevation_deg)
+        total += sample(view, _relative_azimuth(d, sun)) * atmosphere.SOLAR_ILLUMINANCE_LUX
+
+    moon = conditions.moon
+    if moon.is_up and conditions.moon_lux > 0.0:
+        view = atmosphere.sky_view(atm, moon.elevation_deg)
+        # `moon_lux` is the horizontal illuminance at the ground; the table wants it at the top of
+        # the air, at normal incidence.
+        mu = math.sin(math.radians(max(moon.elevation_deg, 1.0)))
+        t_ground = float(atmosphere.transmittance_to_space(0.0, mu, atm)[1])
+        source = conditions.moon_lux / (mu * max(t_ground, 1e-3))
+        total += (sample(view, _relative_azimuth(d, moon)) * source
+                  * np.asarray(MOONLIGHT_TINT))
+
+    total += STARLIGHT_LUX * conditions.star_intensity / math.pi * np.asarray(MOONLIGHT_TINT)
+
+    if conditions.cloud is not None:
+        above = d[..., 1] > 0.0
+        if np.any(above):
+            total[above] = _composite_cloud(d[above], total[above], conditions)
+    return np.clip(total * conditions.exposure_scale, 0.0, None)
+
+
 def _composite_cloud(
     directions: np.ndarray, sky: np.ndarray, conditions: SkyConditions
 ) -> np.ndarray:
@@ -366,10 +437,22 @@ def _composite_cloud(
 
     The same march the infrared band uses, so the two bands cannot put cloud in different places.
     """
+    transmittance, added = _cloud_terms(directions, conditions)
+    return sky * transmittance[..., None] + added
+
+
+def _cloud_terms(directions: np.ndarray, conditions: SkyConditions) -> Tuple[np.ndarray, np.ndarray]:
+    """What the cloud does along each direction: ``(transmittance, added luminance)``.
+
+    Kept as two terms so a caller can march coarsely and upsample them without blurring the sky
+    behind the cloud: ``out = transmittance * sky + added``.
+    """
     field = conditions.cloud
     assert field is not None
     origin = np.zeros(directions.shape, dtype=np.float64)
+    origin[..., 0] = -conditions.cloud_offset_m[0]
     origin[..., 1] = 2.0
+    origin[..., 2] = -conditions.cloud_offset_m[2]
 
     lit_by = conditions.sun if conditions.sun.elevation_deg > 0.0 else conditions.moon
     sun_direction = lit_by.direction() if lit_by.elevation_deg > 0.0 else None
@@ -377,32 +460,56 @@ def _composite_cloud(
         origin, directions, sun_direction=sun_direction, steps=int(conditions.march_steps)
     )
 
-    out = sky * result.transmittance[..., None]
+    added = np.zeros(directions.shape, dtype=np.float64)
     if result.radiance is not None:
         # The incident illuminance on the cloud tops, spread over the hemisphere: what the
         # albedo the march returns is a fraction *of*.
         # The beam that lights the cloud is the beam that reached it, and at a low sun that beam
         # is orange. A cloud is white; everything people photograph at sunset is this tint.
-        reddening = np.asarray(beam_tint(lit_by.elevation_deg, conditions.turbidity))
+        reddening = sun_colour(lit_by.elevation_deg, conditions.turbidity)
         if lit_by is conditions.sun:
             source = 1.6e9 * math.sin(math.radians(max(lit_by.elevation_deg, 0.0)))
             source *= conditions.daylight
             tint = reddening
         else:
-            source = conditions.moon_lux / math.pi * 1.0e4
+            # The same scale as the sun's line above, which is 1.6e4 per lux of *horizontal*
+            # illuminance -- and moon_lux is horizontal. (It was 1e4/pi: five times too dark.)
+            source = 1.6e4 * conditions.moon_lux
             tint = np.asarray(MOONLIGHT_TINT) * reddening
-        out = out + result.radiance[..., None] * source / math.pi * tint * 1e-4
-    return out
+        added = (result.radiance[..., None] * source / math.pi * tint * 1e-4
+                 * _cloud_colour(result.radiance, result.transmittance, conditions))
+    return result.transmittance, added
+
+
+def _cloud_colour(radiance: np.ndarray, transmittance: np.ndarray, conditions: SkyConditions) -> np.ndarray:
+    """Per-pixel colour of the cloud: the shadow colour where it is self-shadowed, the lit colour
+    where the sun reaches it, blended by how lit the march found it.
+
+    "How lit" is the scattered radiance per unit of cloud opacity, which runs from the march's
+    shadow floor (a fully shadowed interior) to one (a sunlit face).
+    """
+    from weather_fx.core.clouds import MS_SHADOW_FLOOR
+
+    lit = np.asarray(conditions.cloud_lit_colour, dtype=np.float64)
+    shadow = np.asarray(conditions.cloud_shadow_colour, dtype=np.float64)
+    if np.allclose(lit, shadow):
+        return lit
+    litness = radiance / np.maximum(1.0 - transmittance, 1e-3)
+    w = np.clip((litness - MS_SHADOW_FLOOR) / (1.0 - MS_SHADOW_FLOOR), 0.0, 1.0)[..., None]
+    return shadow * (1.0 - w) + lit * w
 
 
 #: Renderer-side level the *brightest part of the sky* is exposed to, in the units an RTX dome
 #: light's `intensity` multiplies its texture by. Measured by sweeping the intensity on a demo
-#: stage: a clear midday sky's 99th percentile sits near 20,000 cd/m2 and renders correctly at an
-#: intensity near 0.025, which puts that percentile at 500.
-DOME_HIGHLIGHT_TARGET = 500.0
-#: The 99th-percentile luminance of a clear midday sky, cd/m2 -- the anchor the adaptation is
-#: written about. Measured from this model at a 58 degree sun.
-DAYLIGHT_REFERENCE_CD_M2 = 20_000.0
+#: stage: a clear midday sky renders correctly at an intensity near 0.025 -- which also sets the
+#: sun, exposed by the same factor, and so the brightness of sunlit ground. The two constants
+#: below are anchored so that intensity is unchanged: 0.025 times the reference.
+DOME_HIGHLIGHT_TARGET = 217.5
+#: The metered 99th-percentile luminance of a clear midday sky, cd/m2 -- the anchor the adaptation
+#: is written about. Measured from the atmosphere model at a 65 degree sun, turbidity 2.1, with the
+#: cone around the sun excluded (METER_EXCLUSION_DEG). The Preetham fit, metered with the aureole
+#: included, put it at 20,000.
+DAYLIGHT_REFERENCE_CD_M2 = 8_700.0
 #: How completely the exposure adapts to the scene. **A tone decision, stated rather than hidden.**
 #: The sky spans seven decades between noon and a moonless night and a display spans two, so
 #: something has to compress it: 1.0 exposes every frame to the same brightness and a moonlit
@@ -412,7 +519,145 @@ DAYLIGHT_REFERENCE_CD_M2 = 20_000.0
 EXPOSURE_ADAPTATION = 0.83
 
 
-def dome_exposure(image: np.ndarray) -> float:
+#: Half-angle of the cone around the sun and the moon that the exposure meter ignores, degrees.
+#: The aureole inside it is the brightest part of any sky, and at night it is *all* the meter saw:
+#: a full moon's glow set the exposure and left the rest of the sky and the landscape black --
+#: a moonless night measured brighter than a moonlit one.
+METER_EXCLUSION_DEG = 25.0
+#: Rec. 709 luminance weights, for linear sRGB.
+LUMA = np.array([0.2126, 0.7152, 0.0722])
+
+
+#: The direct sun's correlated colour temperature at a high sun, kelvin: what the viewport's
+#: colours are balanced to, so a midday sun renders white.
+SUN_CCT_HIGH_K = 5_800.0
+#: The sun's colour temperature at the horizon, kelvin.
+SUN_CCT_HORIZON_K = 2_000.0
+#: Elevation scale of the approach from one to the other, degrees, at turbidity 2.8.
+SUN_CCT_SCALE_DEG = 12.0
+
+
+def _planck_srgb(cct_k: float) -> np.ndarray:
+    """Linear sRGB of a blackbody at ``cct_k``, unit luminance (Kim et al. 2002 Planckian locus)."""
+    t = float(np.clip(cct_k, 1_667.0, 25_000.0))
+    if t <= 4_000.0:
+        x = -0.2661239e9 / t**3 - 0.2343589e6 / t**2 + 0.8776956e3 / t + 0.179910
+    else:
+        x = -3.0258469e9 / t**3 + 2.1070379e6 / t**2 + 0.2226347e3 / t + 0.240390
+    if t <= 2_222.0:
+        y = -1.1063814 * x**3 - 1.34811020 * x**2 + 2.18555832 * x - 0.20219683
+    elif t <= 4_000.0:
+        y = -0.9549476 * x**3 - 1.37418593 * x**2 + 2.09137015 * x - 0.16748867
+    else:
+        y = 3.0817580 * x**3 - 5.87338670 * x**2 + 3.75112997 * x - 0.37001483
+    return _xyy_to_linear_rgb(1.0, x, y)
+
+
+def sun_colour(elevation_deg: float, turbidity: float = 2.8) -> np.ndarray:
+    """Colour of direct sunlight as a camera balanced for a high sun records it. Unit luminance.
+
+    From the sun's measured colour temperature, which climbs from about 2,000 K on the horizon
+    through 3,300 K at 5 degrees and 4,100 K at 10 to 5,100 K at 20 and 5,800 K overhead; haze
+    slows the climb. :func:`weather_fx.core.meteorology.beam_tint` computes the reddening from
+    first principles at the three primaries' single wavelengths, which puts a 10 degree sun near
+    3,000 K and turned every morning cloud orange; the visible rendering uses this instead, and
+    the thermal model keeps ``beam_tint``, which it was calibrated with.
+    """
+    scale = SUN_CCT_SCALE_DEG * math.sqrt(max(float(turbidity), 1.0) / 2.8)
+    el = max(float(elevation_deg), 0.0)
+    cct = SUN_CCT_HIGH_K - (SUN_CCT_HIGH_K - SUN_CCT_HORIZON_K) * math.exp(-el / scale)
+    rgb = _planck_srgb(cct) / _planck_srgb(SUN_CCT_HIGH_K)
+    return rgb / float(rgb @ LUMA)
+
+
+#: How much the sky's own light counts toward the white point, against the direct beam. Eyes and
+#: cameras adapt to the brightest white in view -- a sunlit cloud, sunlit ground -- far more than
+#: to the blue fill from the sky; weighting them equally cancels the warm sun against the blue sky
+#: and leaves a morning's sunlit clouds orange, which nobody sees.
+WHITE_POINT_SKY_WEIGHT = 0.25
+
+
+def scene_illuminant(image: np.ndarray, conditions: SkyConditions,
+                     sky_weight: float = 1.0) -> np.ndarray:
+    """RGB illuminance on a horizontal surface: the sky in ``image`` plus the sun and moon beams.
+
+    With ``sky_weight`` 1 it is the light the scene is lit by, which is what the exposure meters.
+    With WHITE_POINT_SKY_WEIGHT it is the white point a camera's balance settles on. The beams use
+    the same formulas the viewport's lights do.
+    """
+    from weather_fx.core.meteorology import clear_sky_irradiance
+
+    directions = latlong_directions(image.shape[0])
+    up = np.clip(directions[..., 1], 0.0, None)
+    rows = image.shape[0]
+    # Each texel's solid angle on a lat-long map: (pi/rows) * (2 pi / 2rows) * sin(polar angle).
+    polar = (np.arange(rows) + 0.5) * (math.pi / rows)
+    solid = (math.pi / rows) ** 2 * np.sin(polar)[:, None]
+    sky = (image * (up * solid)[..., None]).sum(axis=(0, 1))
+
+    total = sky.astype(np.float64) * float(sky_weight)
+    sun = conditions.sun
+    if sun.elevation_deg > 0.0:
+        beam = (float(clear_sky_irradiance(sun.elevation_deg, conditions.turbidity)[0])
+                * LUMINOUS_EFFICACY_DAYLIGHT * conditions.daylight
+                * math.sin(math.radians(sun.elevation_deg)))
+        total = total + sun_colour(sun.elevation_deg, conditions.turbidity) * beam
+    moon = conditions.moon
+    if moon.is_up and conditions.moon_lux > 0.0:
+        tint = sun_colour(moon.elevation_deg, conditions.turbidity) * MOONLIGHT_TINT
+        total = total + tint * conditions.moon_lux
+    return total
+
+
+def white_balance_gains(illuminant: Any, strength: float) -> np.ndarray:
+    """Per-channel gains that pull ``illuminant`` toward neutral, luminance-preserving.
+
+    ``strength`` 1 is a camera's full auto white balance (every light source rendered white);
+    0 leaves the light as the physics made it. Real cameras and eyes sit in between -- a sunset
+    still reads warm -- which is why the default is below 1.
+    """
+    ill = np.maximum(np.asarray(illuminant, dtype=np.float64), 1e-12)
+    y = float(ill @ LUMA)
+    if y <= 0.0 or strength <= 0.0:
+        return np.ones(3)
+    gains = (y / ill) ** float(np.clip(strength, 0.0, 1.0))
+    # Keep the balanced illuminant's luminance where it was: white balance changes colour, not level.
+    gains /= float((gains * ill) @ LUMA) / y
+    return gains
+
+
+#: Illuminance on the ground under a clear midday sky (65 degree sun, turbidity 2.1), lux, and the
+#: dome intensity measured to render it correctly on the demo stage. The incident meter below is
+#: anchored on this pair, so midday is exactly what it was.
+INCIDENT_REFERENCE_LUX = 100_000.0
+EXPOSURE_AT_REFERENCE = 0.025
+#: How far the metered sky highlights may go above DOME_HIGHLIGHT_TARGET before they cap the
+#: exposure: 8 is three stops. Exposing for a sunset's dim ground would otherwise blow out the sky.
+HIGHLIGHT_HEADROOM = 8.0
+
+
+def dome_exposure(image: np.ndarray, conditions: Optional[SkyConditions] = None) -> float:
+    """The dome and light intensity that puts the scene where a camera would put it.
+
+    With ``conditions`` it is an **incident-light meter**: it exposes for the light falling on the
+    ground (sky plus sun or moon, :func:`scene_illuminant`), adapted by EXPOSURE_ADAPTATION, and
+    capped so the sky's highlights -- metered away from the sun and moon -- stay within
+    HIGHLIGHT_HEADROOM of the target. Metering the scene's light rather than the sky's brightest
+    patch is what keeps a moonlit landscape readable: the sky meter exposed for the moon's glow and
+    left everything else black.
+
+    Without ``conditions`` it falls back to the sky-highlight meter alone.
+    """
+    highlight = _highlight_exposure(image, conditions)
+    if conditions is None:
+        return highlight
+    lux = float(scene_illuminant(image, conditions) @ LUMA)
+    incident = EXPOSURE_AT_REFERENCE * (
+        INCIDENT_REFERENCE_LUX / max(lux, 1e-9)) ** EXPOSURE_ADAPTATION
+    return float(np.clip(min(incident, HIGHLIGHT_HEADROOM * highlight), 1e-6, 1e9))
+
+
+def _highlight_exposure(image: np.ndarray, conditions: Optional[SkyConditions] = None) -> float:
     """The dome-light intensity that puts ``image`` (cd/m2) where a camera would put it.
 
     **Meter on the highlights, not on the middle.** A median is the wrong statistic for a sky and
@@ -428,6 +673,12 @@ def dome_exposure(image: np.ndarray) -> float:
     """
     directions = latlong_directions(image.shape[0])
     above = directions[..., 1] > 0.0
+    if conditions is not None:
+        cos_limit = math.cos(math.radians(METER_EXCLUSION_DEG))
+        for body in (conditions.sun, conditions.moon):
+            if body.elevation_deg > -METER_EXCLUSION_DEG:
+                toward = np.asarray(body.direction(), dtype=np.float64)
+                above &= (directions @ toward) < cos_limit
     luminance = image[above].mean(axis=-1) if np.any(above) else np.asarray([1.0])
     bright = float(np.percentile(luminance, 99.0))
     adapted = DAYLIGHT_REFERENCE_CD_M2 * (
@@ -447,4 +698,43 @@ def environment_map(conditions: SkyConditions, height: int = 1024) -> np.ndarray
     and the encode discipline is cheaper to keep than to retrofit.
     """
     directions = latlong_directions(height)
-    return sky_radiance_rgb(directions, conditions).astype(np.float32)
+    if conditions.cloud is None or conditions.cloud_rows >= height:
+        return sky_radiance_rgb(directions, conditions).astype(np.float32)
+
+    # The clear sky at full resolution; the cloud marched on a coarser grid and upsampled. The
+    # march is the entire cost of a cloudy bake, and it scales with the texel count.
+    clear = sky_radiance_rgb(directions, _without_cloud(conditions))
+    rows = max(8, int(conditions.cloud_rows) // 2 * 2)
+    coarse_dirs = latlong_directions(rows)
+    up = coarse_dirs[..., 1] > 0.0
+    transmit = np.ones(coarse_dirs.shape[:2])
+    added = np.zeros(coarse_dirs.shape)
+    transmit[up], added[up] = _cloud_terms(coarse_dirs[up], conditions)
+    t_full = _upsample_latlong(transmit[..., None], height)[..., 0]
+    a_full = _upsample_latlong(added, height) * conditions.exposure_scale
+    above = directions[..., 1] > 0.0
+    out = clear.copy()
+    out[above] = clear[above] * t_full[above][..., None] + a_full[above]
+    return np.clip(out, 0.0, None).astype(np.float32)
+
+
+def _without_cloud(conditions: SkyConditions) -> SkyConditions:
+    from dataclasses import replace
+
+    return replace(conditions, cloud=None)
+
+
+def _upsample_latlong(image: np.ndarray, height: int) -> np.ndarray:
+    """Bilinear upsample of a lat-long map to ``height`` rows, wrapping in longitude."""
+    rows, cols = image.shape[:2]
+    width = 2 * height
+    y = np.clip((np.arange(height) + 0.5) * rows / height - 0.5, 0.0, rows - 1.0)
+    x = (np.arange(width) + 0.5) * cols / width - 0.5
+    y0 = np.minimum(np.floor(y).astype(np.int64), rows - 2)
+    fy = (y - y0)[:, None, None]
+    x0 = np.floor(x).astype(np.int64)
+    fx = (x - x0)[None, :, None]
+    x0w, x1w = x0 % cols, (x0 + 1) % cols
+    top = image[y0][:, x0w] * (1 - fx) + image[y0][:, x1w] * fx
+    bottom = image[y0 + 1][:, x0w] * (1 - fx) + image[y0 + 1][:, x1w] * fx
+    return top * (1 - fy) + bottom * fy

@@ -37,14 +37,24 @@ import pathlib
 import tempfile
 from typing import Any, Optional, Set
 
-from ...core.meteorology import beam_tint, clear_sky_irradiance
+import numpy as np
+
+from ...core.meteorology import clear_sky_irradiance
 from ...core.sky import (
+    WHITE_POINT_SKY_WEIGHT,
     SkyConditions,
     dome_exposure,
+    scene_illuminant,
+    sun_colour,
+    white_balance_gains,
     conditions_from_state,
     environment_map,
 )
+from ...core.clouds import CLOUD_SHAPE_KEYS, cloud_field_from_state, stage_to_field
+from ...core.jobs import LatestJob
 from ..base import Effect
+from .render_mode import RenderModeWatcher, cloud_path
+from .scene_lights import SceneLightSuppressor
 
 log = logging.getLogger("weather_fx")
 
@@ -67,12 +77,19 @@ class SkyEffect(Effect):
     #: Which parameters the baked texture depends on. A change to anything else -- the sun's
     #: intensity scale, say -- re-aims the lights without paying for a rebake.
     _BAKE_KEYS = (
-        ("sky", ("latitude_deg", "longitude_deg", "date_utc", "hour_utc", "turbidity",
-                 "ground_albedo", "star_intensity", "dome_resolution")),
-        ("clouds", ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c",
-                    "thickness_m", "optical_depth", "feature_m", "cells", "levels", "cell_m",
-                    "seed", "march_steps")),
+        ("sky", ("model", "horizon_blend_deg", "latitude_deg", "longitude_deg", "date_utc",
+                 "hour_utc", "turbidity", "ground_albedo", "star_intensity", "dome_resolution",
+                 "white_balance")),
     )
+    #: Cloud parameters the dome depends on -- only when the clouds are painted into it. Under the
+    #: path tracer they are volumes and the dome is clear sky, so a cloud edit costs it nothing.
+    _DOME_CLOUD_KEYS = CLOUD_SHAPE_KEYS + ("march_steps", "lit_color", "shadow_color", "dome_rows")
+    #: Rows of the quick clear-sky bake put up the first time, so the dome is never untextured
+    #: (a dome light with no texture is a uniform white light) while the real one is baking.
+    _FIRST_BAKE_ROWS = 256
+    #: Drift, in metres, after which the dome's painted clouds are re-baked where the wind has
+    #: carried them. A dome cannot move a cloud continuously; this is the step it moves in.
+    _DOME_DRIFT_STEP_M = 250.0
 
     def __init__(self, texture_dir: Optional[str] = None):
         self._texture_dir = pathlib.Path(texture_dir) if texture_dir else None
@@ -81,6 +98,18 @@ class SkyEffect(Effect):
         self._conditions: Optional[SkyConditions] = None
         self._authored = False
         self._exposure = 1.0
+        self._scene_lights = SceneLightSuppressor()
+        self._job = LatestJob("weather_fx-sky")
+        self._watcher: Optional[RenderModeWatcher] = None
+        self._baked_conditions: Optional[SkyConditions] = None
+        self._sun_base = 0.0
+        self._gains = (1.0, 1.0, 1.0)
+        self._shadow = 1.0
+        self._shadow_clock = 0.0
+
+    def attach(self, context) -> None:
+        super().attach(context)
+        self._watcher = RenderModeWatcher()
 
     # --- lifecycle ---------------------------------------------------------------------
 
@@ -94,17 +123,133 @@ class SkyEffect(Effect):
         if self._authored and not ({"sky", "clouds", "general"} & set(changed)):
             return
 
-        key = self._bake_key(state)
-        rebake = key != self._baked_key or self._texture_path is None
-        if rebake:
-            self._conditions = conditions_from_state(state)
-            self._bake(state, key)
-            self._baked_key = key
-        assert self._conditions is not None
+        path = cloud_path(state)
+        key = self._bake_key(state, path)
+        rebake = key != self._baked_key
+        if rebake and key != self._job.running_key:
+            snapshot = state.copy()
+            directory = self._texture_dir or pathlib.Path(tempfile.gettempdir())
+
+            offset = tuple(float(v) * self._DOME_DRIFT_STEP_M
+                           for v in (self._drift_step(state) if path == "dome" else (0, 0, 0)))
+
+            def bake():
+                return _bake(snapshot, key, path, directory, offset=offset)
+
+            if state.general.time_source == "manual":
+                # Deterministic runs get the sky their state describes on this very frame.
+                self._job.cancel()
+                self._install_bake(bake())
+            else:
+                if self._texture_path is None:
+                    self._install_bake(_bake(snapshot, key + "-first", "volume", directory,
+                                             rows=self._FIRST_BAKE_ROWS))
+                self._job.submit(key, bake)
+        # The sun and the moon are cheap and move now; only the dome texture waits for its bake.
+        self._conditions = conditions_from_state(state, build_cloud=False)
         self._author(stage, state, self._conditions)
         self._authored = True
+        if state.sky.hide_scene_lights:
+            # One stage traversal when the sky is switched on (or the whole state is re-applied),
+            # not one per slider tick: dragging the site or the clock re-bakes on every step.
+            self._scene_lights.suppress(stage, rescan="general" in changed)
+        else:
+            self._scene_lights.restore()
 
     def update(self, dt: float, t: float) -> None:
+        self._poll_bake()
+        self._advance_clock(dt)
+        self._update_shadow(dt)
+        self._follow_drift()
+
+    def _follow_drift(self) -> None:
+        """Re-bake the dome's clouds once the wind has carried them another step."""
+        state = self.context.state
+        if not (self._authored and state.clouds.enabled and cloud_path(state) == "dome"):
+            return
+        if self._bake_key(state, "dome") not in (self._baked_key, self._job.running_key):
+            self.apply_state(state, {"clouds"})
+
+    # --- cloud shadow (real-time) ----------------------------------------------------------
+
+    #: Seconds between shadow checks. A cloud's shadow edge crosses a point in seconds, not frames.
+    _SHADOW_INTERVAL_S = 0.2
+
+    def _cloud_shadow(self, state: Any, conditions: SkyConditions) -> float:
+        """Fraction of the sun's beam reaching the camera through the cloud: ``exp(-tau)``.
+
+        Only on the real-time path, where the clouds are a picture on the dome and cannot block
+        anything. The path tracer's volumes cast their own, real shadows, so there it is 1.
+        Uses the cloud field only if it is already built: this runs on the UI thread.
+        """
+        clouds = state.clouds
+        if not (clouds.enabled and clouds.cast_shadow and conditions.sun.is_up):
+            return 1.0
+        if cloud_path(state) != "dome":
+            return 1.0
+        field = cloud_field_from_state(state, build=False)
+        if field is None:
+            return 1.0
+        mpu = self.context.meters_per_unit()
+        up_axis = self.context.up_axis()
+        anchor_m = np.asarray(self.context.anchor(), dtype=np.float64) * mpu
+        origin = stage_to_field(anchor_m - self.context.cloud_drift_m, up_axis)
+        tau = field.optical_depth_toward(origin, conditions.sun.direction())
+        return float(math.exp(-tau * float(clouds.density_scale)))
+
+    def _update_shadow(self, dt: float) -> None:
+        self._shadow_clock += dt
+        if self._shadow_clock < self._SHADOW_INTERVAL_S or not self._authored:
+            return
+        self._shadow_clock = 0.0
+        if self._conditions is None:
+            return
+        shadow = self._cloud_shadow(self.context.state, self._conditions)
+        if abs(shadow - self._shadow) < 0.01:
+            return
+        self._shadow = shadow
+        stage = self.context.stage()
+        if stage is None:
+            return
+        from pxr import Usd, UsdLux
+
+        light = UsdLux.DistantLight(stage.GetPrimAtPath(SUN_PATH))
+        if light and self.context.state.sky.sun_enabled and self._conditions.sun.is_up:
+            with Usd.EditContext(stage, stage.GetSessionLayer()):
+                light.CreateIntensityAttr(float(self._sun_base * shadow))
+
+    def _poll_bake(self) -> None:
+        if self._watcher is not None and self._watcher.changed() and self._authored:
+            self.apply_state(self.context.state, {"clouds"})
+        try:
+            done = self._job.poll()
+        except Exception:
+            log.exception("weather_fx: baking the sky failed")
+            return
+        if done is None:
+            return
+        _, result = done
+        stage = self.context.stage()
+        if stage is None or not self._authored:
+            _unlink(result["texture"])
+            return
+        self._install_bake(result)
+        state = self.context.state
+        if self._conditions is not None:
+            self._author(stage, state, self._conditions)
+
+    def _install_bake(self, result: dict) -> None:
+        previous = self._texture_path
+        self._texture_path = result["texture"]
+        self._exposure = result["exposure"]
+        self._baked_key = result["key"]
+        self._baked_conditions = result["conditions"]
+        self._gains = result.get("gains", (1.0, 1.0, 1.0))
+        if previous is not None and previous != self._texture_path:
+            # The renderer may still hold the old one; a temp file is the OS's problem after that.
+            _unlink(previous)
+
+    def _advance_clock(self, dt: float) -> None:
         """Advance the clock, if the state asks for it.
 
         Deliberately *not* a rebake every frame: the sky is written back into the state's own
@@ -121,6 +266,10 @@ class SkyEffect(Effect):
         state.sky.hour_utc = (state.sky.hour_utc + hours) % 24.0
 
     def detach(self) -> None:
+        try:
+            self._scene_lights.restore()
+        except Exception:
+            log.exception("weather_fx: could not restore the scene lights")
         stage = self.context.stage() if hasattr(self, "context") else None
         if stage is not None:
             try:
@@ -133,6 +282,10 @@ class SkyEffect(Effect):
                 log.exception("weather_fx: could not remove the sky prims")
         self._authored = False
         self._baked_key = None
+        self._job.cancel()
+        if self._texture_path is not None:
+            _unlink(self._texture_path)
+            self._texture_path = None
 
     def stats(self) -> dict:
         if self._conditions is None:
@@ -140,6 +293,7 @@ class SkyEffect(Effect):
         conditions = self._conditions
         return {
             "authored": self._authored,
+            "scene_lights_hidden": self._scene_lights.hidden_count,
             "utc": conditions.when.isoformat(),
             "sun_elevation_deg": round(conditions.sun.elevation_deg, 2),
             "sun_azimuth_deg": round(conditions.sun.azimuth_deg, 2),
@@ -147,57 +301,32 @@ class SkyEffect(Effect):
             "moon_phase": conditions.moon.phase_name,
             "moon_lux": round(conditions.moon_lux, 4),
             "daylight": round(conditions.daylight, 4),
-            "cloud_cover": (
-                round(conditions.cloud.measured_cover, 3) if conditions.cloud else 0.0
+            "cloud_cover_in_dome": (
+                round(self._baked_conditions.cloud.measured_cover, 3)
+                if self._baked_conditions is not None and self._baked_conditions.cloud else 0.0
             ),
+            "baking": self._job.busy,
+            "sun_through_cloud": round(self._shadow, 3),
+            "white_balance_gains": [round(g, 3) for g in self._gains],
             "texture": str(self._texture_path) if self._texture_path else None,
         }
 
     # --- the bake ------------------------------------------------------------------------
 
-    def _bake_key(self, state: Any) -> str:
-        parts = []
+    def _drift_step(self, state: Any) -> tuple:
+        """The drift, in whole dome steps: a new value is a new bake."""
+        drift = stage_to_field(self.context.cloud_drift_m, self.context.up_axis())
+        return tuple(int(round(float(v) / self._DOME_DRIFT_STEP_M)) for v in drift)
+
+    def _bake_key(self, state: Any, path: str) -> str:
+        parts = [f"path={path}"]
         for section, names in self._BAKE_KEYS:
             block = getattr(state, section)
             parts.extend(f"{section}.{n}={getattr(block, n)!r}" for n in names)
+        if path == "dome" and state.clouds.enabled:
+            parts.extend(f"clouds.{n}={getattr(state.clouds, n)!r}" for n in self._DOME_CLOUD_KEYS)
+            parts.append(f"drift={self._drift_step(state)!r}")
         return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
-
-    def _bake(self, state: Any, key: str = "") -> None:
-        from ...core.exr import write_exr
-
-        assert self._conditions is not None
-        height = int(state.sky.dome_resolution)
-        image = environment_map(self._conditions, height=height)
-
-        # The dome's *intensity* carries the exposure and the texture stays in honest cd/m2. The
-        # sky's absolute level moves by seven decades between noon and a moonless night, and no
-        # fixed intensity survives that: one end of the day is blown out and the other is black.
-        # The rule lives in `core.sky.dome_exposure` so it can be tested without a renderer.
-        self._exposure = dome_exposure(image)
-
-        directory = self._texture_dir or pathlib.Path(tempfile.gettempdir())
-        directory.mkdir(parents=True, exist_ok=True)
-        # **One file per bake, not one per process.** Writing every sky to the same path looks
-        # tidy and breaks two ways at once: the renderer caches a texture by its path, so the
-        # second sky of a session is served the first one's pixels, and overwriting a file the
-        # loader may still be reading produces "Unexpected data block y coordinate" from
-        # OpenEXR -- a half-written file, read as a whole one. Both were live until this was
-        # measured: a scenario sweep rendered thirteen different skies as one.
-        #
-        # The pid keeps two processes on a shared machine apart; the bake key keeps two skies
-        # within one process apart, and makes the name reproducible for the same conditions.
-        previous = self._texture_path
-        digest = key or self._bake_key(state)
-        path = directory / f"weather_fx_sky_{os.getpid()}_{digest[:12]}.exr"
-        write_exr(path, image)
-        self._texture_path = path
-        if previous is not None and previous != path:
-            # The renderer may still hold the old one; a failure to remove it is not worth a
-            # broken sky, and a temp file is the operating system's problem after that.
-            try:
-                previous.unlink()
-            except OSError:
-                log.debug("weather_fx: could not remove the previous sky texture %s", previous)
 
     # --- authoring -----------------------------------------------------------------------
 
@@ -214,13 +343,27 @@ class SkyEffect(Effect):
         # light is exactly as bright as the irradiance says and exactly as orange as the airmass
         # says. Without this a scene at a four-degree sun is merely dim, which is the one thing a
         # sunset is not.
-        sun_tint = beam_tint(conditions.sun.elevation_deg, conditions.turbidity)
+        # The white balance the dome was baked with goes on the lights too (see `_bake`).
+        gains = self._gains
+        sun_tint = tuple(t * g for t, g in zip(
+            sun_colour(conditions.sun.elevation_deg, conditions.turbidity), gains))
         sun_peak = max(sun_tint) or 1.0
         moon_tint = tuple(
-            a * b for a, b in zip(beam_tint(conditions.moon.elevation_deg, conditions.turbidity),
-                                  (0.84, 0.90, 1.0))
+            a * b * g for a, b, g in zip(
+                sun_colour(conditions.moon.elevation_deg, conditions.turbidity),
+                (0.84, 0.90, 1.0), gains)
         )
         moon_peak = max(moon_tint) or 1.0
+
+        self._sun_base = (
+            float(clear_sky_irradiance(conditions.sun.elevation_deg, conditions.turbidity)[0])
+            * LUMINOUS_EFFICACY_DAYLIGHT
+            * conditions.daylight
+            * self._exposure
+            * scale
+            * sun_peak
+        )
+        self._shadow = self._cloud_shadow(state, conditions)
 
         with Usd.EditContext(stage, stage.GetSessionLayer()):
             stage.DefinePrim("/WeatherFX", "Xform")
@@ -250,18 +393,7 @@ class SkyEffect(Effect):
                 conditions.sun,
                 up_axis,
                 enabled=bool(sky.sun_enabled) and conditions.sun.is_up,
-                intensity=(
-                    float(
-                        clear_sky_irradiance(
-                            conditions.sun.elevation_deg, conditions.turbidity
-                        )[0]
-                    )
-                    * LUMINOUS_EFFICACY_DAYLIGHT
-                    * conditions.daylight
-                    * self._exposure
-                    * scale
-                    * sun_peak
-                ),
+                intensity=self._sun_base * self._shadow,
                 colour=tuple(c / sun_peak for c in sun_tint),
             )
             self._author_body(
@@ -329,3 +461,45 @@ class SkyEffect(Effect):
         light.CreateIntensityAttr(float(intensity))
         light.CreateAngleAttr(float(body.angular_diameter_deg))
         light.CreateColorAttr(Gf.Vec3f(*colour))
+
+
+def _unlink(path: Any) -> None:
+    try:
+        pathlib.Path(path).unlink()
+    except OSError:
+        log.debug("weather_fx: could not remove the sky texture %s", path)
+
+
+def _bake(state: Any, key: str, path: str, directory: pathlib.Path, rows: Optional[int] = None,
+          offset: tuple = (0.0, 0.0, 0.0)) -> dict:
+    """Bake the dome texture. Runs in a worker thread, so it touches nothing but its arguments.
+
+    The dome's *intensity* carries the exposure and the texture stays in honest cd/m2: the sky's
+    level moves by seven decades between noon and a moonless night and no fixed intensity survives
+    that. The rule lives in `core.sky.dome_exposure` so it can be tested without a renderer.
+
+    **One file per bake.** The renderer caches a texture by its path, so reusing one served every
+    later sky the first one's pixels, and overwriting a file the loader was still reading produced
+    "Unexpected data block y coordinate" from OpenEXR. The pid keeps processes apart and the bake
+    key keeps skies apart.
+    """
+    from ...core.exr import write_exr
+
+    from dataclasses import replace
+
+    conditions = replace(conditions_from_state(state, build_cloud=(path == "dome")),
+                         cloud_offset_m=tuple(offset))
+    image = environment_map(conditions, height=int(rows or state.sky.dome_resolution))
+    exposure = dome_exposure(image, conditions)
+    # The camera's white balance, from the light the scene is actually lit by. The same gains go
+    # on the sun and the moon in `_author`, so the sky, the clouds and every lit surface shift
+    # together -- which is what a camera does and what a per-object tint cannot.
+    gains = white_balance_gains(
+        scene_illuminant(image, conditions, sky_weight=WHITE_POINT_SKY_WEIGHT),
+        float(state.sky.white_balance))
+    image = (image * gains.astype(np.float32)).astype(np.float32)
+    directory.mkdir(parents=True, exist_ok=True)
+    texture = directory / f"weather_fx_sky_{os.getpid()}_{key[:18]}.exr"
+    write_exr(texture, image)
+    return {"texture": texture, "exposure": exposure, "key": key,
+            "conditions": conditions, "gains": tuple(float(g) for g in gains)}

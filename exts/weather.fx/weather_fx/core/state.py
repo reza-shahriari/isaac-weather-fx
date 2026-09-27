@@ -148,11 +148,33 @@ class SkyParams:
     turbidity: float = param(2.8, "Turbidity", min=1.8, max=10.0,
                              tooltip="Linke turbidity: 2 is a very clear day, 6 is hazy, 10 is "
                                      "industrial murk. Drives the sky's colour and its brightness.")
+    model: str = param("atmosphere", "Sky model", choices=("atmosphere", "preetham"), advanced=True,
+                       tooltip="atmosphere: physically based scattering over a round planet "
+                               "(Hillaire 2020, the model behind Unreal's Sky Atmosphere). "
+                               "preetham: the older analytic fit, kept for comparison.")
+    white_balance: float = param(0.9, "Auto white balance", min=0.0, max=1.0,
+                                 tooltip="How far the camera neutralises the colour of the light, "
+                                         "as a real camera or eye does. 1 renders every light "
+                                         "source white; 0 is the raw physics (orange mornings, "
+                                         "blue nights). The last minutes before sunset stay warm.")
+    horizon_blend_deg: float = param(4.0, "Horizon blend", min=0.0, max=20.0, unit="deg",
+                                     tooltip="How far below the horizon the dome's ground fades "
+                                             "into the sky. 0 is the bare model: a sharp line "
+                                             "five kilometres away.")
     ground_albedo: Vec3 = param((0.16, 0.17, 0.12), "Ground albedo", min=0.0, max=1.0,
                                 widget="color", advanced=True)
     exposure_scale: float = param(1.0, "Exposure", min=0.05, max=20.0, log_scale=True,
                                   tooltip="Multiplies the dome and both lights together, so the "
                                           "relative brightness of sky, sun and moon is preserved.")
+    aerial_perspective: bool = param(True, "Distance haze",
+                                     tooltip="With fog off, fade distant geometry into the sky's "
+                                             "horizon colour at the visibility the turbidity "
+                                             "implies. Fog, when on, takes over.")
+    hide_scene_lights: bool = param(True, "Hide scene lights",
+                                    tooltip="While the sky is on, hide every light outside "
+                                            "/WeatherFX (the stage's default light and dome), so "
+                                            "there is one sun. Session layer only; restored when "
+                                            "the sky is turned off.")
     sun_enabled: bool = param(True, "Sun light")
     moon_enabled: bool = param(True, "Moon light",
                                tooltip="The only thing that lights an outdoor night scene.")
@@ -170,6 +192,29 @@ class CloudParams:
     """The cloud field. One parameterisation, read by every band that looks up."""
 
     enabled: bool = param(False, "Enabled")
+    render_path: str = param("auto", "Render as", choices=("auto", "volume", "dome"),
+                             tooltip="auto: 3D volumes under the path tracer, painted into the "
+                                     "sky dome under real-time. volume / dome force one. The "
+                                     "cloud field is the same either way.")
+    lit_color: Vec3 = param((1.0, 1.0, 1.0), "Lit color", min=0.0, max=1.0, widget="color",
+                            tooltip="Colour of the sunlit parts of the cloud. The sun's own tint "
+                                    "is applied on top, so sunsets stay orange.")
+    shadow_color: Vec3 = param((0.82, 0.86, 0.95), "Shadow color", min=0.0, max=1.0,
+                               widget="color",
+                               tooltip="Colour of the self-shadowed parts. Applies to the dome "
+                                       "(real-time); under the path tracer the shadowed side is "
+                                       "whatever the scattering makes it.")
+    density_scale: float = param(1.0, "Density", min=0.05, max=10.0, log_scale=True,
+                                 tooltip="Multiplies the cloud's optical depth. Instant on "
+                                         "volumes: it is a material input, not a rebuild.")
+    wind_factor: float = param(1.5, "Drift with wind", min=0.0, max=5.0,
+                               tooltip="Cloud speed as a multiple of the surface wind (wind "
+                                       "section). Wind strengthens with height, so 1.5-2 is "
+                                       "typical; 0 holds the clouds still.")
+    cast_shadow: bool = param(True, "Cloud shadows",
+                              tooltip="Real-time: dim the sun when a cloud is between it and the "
+                                      "camera. The path tracer's volumes cast real shadows "
+                                      "regardless.")
     cover: float = param(0.35, "Sky cover", min=0.0, max=1.0,
                          tooltip="Fraction of the sky the cloud hides. This is solved for, not "
                                  "approximated: ask for 0.45 and the field measures 0.45.")
@@ -205,6 +250,16 @@ class CloudParams:
                           tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
                                   "the field tiles exactly, so there is no edge to reach.")
     seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+    volume_tiles: int = param(3, "Volume tiles", min=1, max=7, advanced=True,
+                              tooltip="The field tiles exactly; this many tiles across are placed "
+                                      "as volumes, centred on the stage origin. 3 x 15 km covers "
+                                      "the sky to about 20 km in every direction.")
+    phase_bias: float = param(0.85, "Forward scattering", min=0.0, max=0.95, advanced=True,
+                              tooltip="Henyey-Greenstein asymmetry of the volume. 0.85 is cloud "
+                                      "droplets in the visible: the bright silver lining.")
+    dome_rows: int = param(256, "Dome cloud rows", min=64, max=2048, advanced=True,
+                           tooltip="Resolution the dome's cloud layer is marched at before it is "
+                                   "upsampled (real-time path). Higher is sharper and slower.")
     march_steps: int = param(
         64, "March steps", min=16, max=512, advanced=True,
         tooltip="Samples per ray when the dome is baked. 64 is right for a viewport; a still "

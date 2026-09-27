@@ -55,6 +55,14 @@ __all__ = [
     "CloudField",
     "cloud_profile",
     "lifting_condensation_level_m",
+    "VolumeGrid",
+    "CLOUD_SHAPE_KEYS",
+    "cloud_field_from_state",
+    "TilePlacement",
+    "tile_placements",
+    "stage_to_field",
+    "volume_offset_m",
+    "drift_velocity_m_s",
 ]
 
 @dataclass(frozen=True)
@@ -515,6 +523,59 @@ class CloudField:
         out[inside] = c0 * (1 - ti) + c1 * ti
         return out
 
+    def volume_grid(self, up_axis: int = 1) -> "VolumeGrid":
+        """The density as a voxel array in **stage axes**, ready for an OpenVDB fog volume.
+
+        The field's own frame is the Y-up sky frame: ``x`` east, ``y`` up, ``z`` south. A Y-up
+        stage is that frame. A Z-up stage is it turned by +90 degrees about X -- the same turn the
+        dome light gets -- so field ``z`` (south) is stage ``-y`` and field ``y`` is stage ``z``.
+        Getting this wrong would not look wrong: a random field is a random field either way round.
+        It would only put the rendered cloud somewhere other than where the infrared march puts it.
+
+        Values are normalised density in 0..1; multiply by :attr:`extinction_per_m` for the visible
+        extinction. Voxel centres sit where :meth:`density` puts its cell centres, so the grid and
+        the field agree to the sample.
+        """
+        dv = self.thickness_m / self.levels
+        half = self.half_extent_m
+        grid = self._density  # (level, z, x)
+        if up_axis == 1:
+            array = np.transpose(grid, (2, 0, 1))                 # (x, y_up, z)
+            voxel = (self.cell_m, dv, self.cell_m)
+            first = (-half + 0.5 * self.cell_m, self.base_m + 0.5 * dv, -half + 0.5 * self.cell_m)
+        elif up_axis == 2:
+            array = np.transpose(grid, (2, 1, 0))[:, ::-1, :]     # (x, y = -z_field, z_up)
+            voxel = (self.cell_m, self.cell_m, dv)
+            first = (-half + 0.5 * self.cell_m, -half + 0.5 * self.cell_m, self.base_m + 0.5 * dv)
+        else:
+            raise ValueError("up_axis is 1 (Y) or 2 (Z)")
+        return VolumeGrid(
+            values=np.ascontiguousarray(array, dtype=np.float32),
+            voxel_m=tuple(float(v) for v in voxel),  # type: ignore[arg-type]
+            first_centre_m=tuple(float(v) for v in first),  # type: ignore[arg-type]
+            tile_m=float(self.cells * self.cell_m),
+        )
+
+    def optical_depth_toward(self, origin_m: Any, direction: Any, steps: int = 64) -> float:
+        """Visible optical depth from a point toward a direction (the field's frame, metres).
+
+        What decides whether the ground at ``origin_m`` is in a cloud's shadow: the sun's beam
+        reaching it is ``exp(-tau)`` of what it would be in clear air.
+        """
+        o = np.asarray(origin_m, dtype=np.float64).reshape(3)
+        d = np.asarray(direction, dtype=np.float64).reshape(3)
+        d = d / max(float(np.linalg.norm(d)), 1e-12)
+        if d[1] <= 1e-3 or self.cover <= 0.0:
+            return 0.0 if d[1] > 1e-3 else float("inf")
+        t0 = max((self.base_m - o[1]) / d[1], 0.0)
+        t1 = max((self.top_m - o[1]) / d[1], 0.0)
+        if t1 <= t0:
+            return 0.0
+        t = t0 + (np.arange(steps) + 0.5) / steps * (t1 - t0)
+        p = o[None, :] + t[:, None] * d[None, :]
+        rho = self.density(p[:, 0], p[:, 1], p[:, 2])
+        return float(rho.sum() * (t1 - t0) / steps * self.extinction_per_m)
+
     def column_optical_depth(self, x_m: Any = 0.0, z_m: Any = 0.0, samples: int = 64) -> Any:
         """Vertical optical depth through the column over ``(x, z)``. The overhead answer."""
         heights = self.base_m + (np.arange(samples) + 0.5) / samples * self.thickness_m
@@ -775,3 +836,142 @@ class CloudField:
             emission_height_m=emission_height,
             radiance=radiance,
         )
+
+
+@dataclass(frozen=True)
+class VolumeGrid:
+    """A cloud's density on a voxel grid in stage axes and metres. See :meth:`CloudField.volume_grid`."""
+
+    values: np.ndarray                          # (nx, ny, nz) float32, 0..1
+    voxel_m: Tuple[float, float, float]
+    first_centre_m: Tuple[float, float, float]  # world position of voxel (0, 0, 0)'s centre
+    tile_m: float                               # the field repeats every tile_m horizontally
+
+    @property
+    def low_m(self) -> Tuple[float, float, float]:
+        return tuple(c - 0.5 * v for c, v in zip(self.first_centre_m, self.voxel_m))  # type: ignore[return-value]
+
+    @property
+    def high_m(self) -> Tuple[float, float, float]:
+        return tuple(lo + n * v for lo, n, v in zip(self.low_m, self.values.shape, self.voxel_m))  # type: ignore[return-value]
+
+
+#: The cloud parameters that change the field's *shape*. Anything else (colour, density scale,
+#: march steps) can change without paying for a rebuild.
+CLOUD_SHAPE_KEYS = (
+    "enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "thickness_m",
+    "optical_depth", "feature_m", "erosion_scale", "beta_scale", "cells", "levels", "cell_m",
+    "seed",
+)
+
+_FIELD_CACHE: Dict[Tuple[Any, ...], "CloudField"] = {}
+
+
+def cloud_field_from_state(state: Any, build: bool = True):
+    """The cloud field a state describes, or ``None`` for a clear sky. Cached on its shape keys.
+
+    A field of the default size takes seconds to synthesise, and the dome, the volume and any
+    sensor model all want the same one: building it once per shape is the difference between a
+    colour change being instant and it costing a rebuild. The cache holds the last two shapes.
+    ``build=False`` returns the cached field or ``None`` and never pays for one -- for callers on
+    the UI thread.
+    """
+    clouds = state.clouds
+    if not (clouds.enabled and clouds.cover > 0.0):
+        return None
+    key = tuple(getattr(clouds, name) for name in CLOUD_SHAPE_KEYS)
+    cached = _FIELD_CACHE.get(key)
+    if cached is not None or not build:
+        return cached
+    base = clouds.base_m
+    if base <= 0.0:
+        base = lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
+    built = CloudField(
+        cover=float(clouds.cover),
+        base_m=float(base),
+        profile=cloud_profile(clouds.genus),
+        cell_m=float(clouds.cell_m),
+        cells=int(clouds.cells),
+        levels=int(clouds.levels),
+        seed=int(clouds.seed),
+        thickness_m=float(clouds.thickness_m),
+        optical_depth=float(clouds.optical_depth),
+        feature_m=float(clouds.feature_m),
+        erosion_scale=float(clouds.erosion_scale),
+        beta_scale=float(clouds.beta_scale),
+    )
+    while len(_FIELD_CACHE) >= 2:
+        _FIELD_CACHE.pop(next(iter(_FIELD_CACHE)))
+    _FIELD_CACHE[key] = built
+    return built
+
+
+@dataclass(frozen=True)
+class TilePlacement:
+    """One copy of a periodic :class:`VolumeGrid`, shifted by whole tiles. Metres, stage axes."""
+
+    name: str
+    first_centre_m: Tuple[float, float, float]
+    low_m: Tuple[float, float, float]
+    high_m: Tuple[float, float, float]
+
+
+def tile_placements(grid: VolumeGrid, tiles: int, up_axis: int = 1) -> list:
+    """``tiles x tiles`` copies of ``grid`` around the origin, shifted along the two horizontal
+    axes. Because the field is exactly periodic, neighbouring copies meet without a seam."""
+    tiles = max(1, int(tiles))
+    horizontal = (0, 2) if up_axis == 1 else (0, 1)
+    half = tiles // 2
+    out = []
+    for a in range(-half, tiles - half):
+        for b in range(-half, tiles - half):
+            shift = [0.0, 0.0, 0.0]
+            shift[horizontal[0]] = a * grid.tile_m
+            shift[horizontal[1]] = b * grid.tile_m
+            out.append(TilePlacement(
+                name=f"Tile_{a - -half}_{b - -half}",
+                first_centre_m=tuple(c + s for c, s in zip(grid.first_centre_m, shift)),  # type: ignore[arg-type]
+                low_m=tuple(c + s for c, s in zip(grid.low_m, shift)),  # type: ignore[arg-type]
+                high_m=tuple(c + s for c, s in zip(grid.high_m, shift)),  # type: ignore[arg-type]
+            ))
+    return out
+
+
+def stage_to_field(point: Any, up_axis: int = 1) -> np.ndarray:
+    """A stage-axes position (metres) in the field's Y-up frame: the inverse of the dome's turn."""
+    p = np.asarray(point, dtype=np.float64)
+    if up_axis == 1:
+        return p.copy()
+    return np.stack([p[..., 0], p[..., 2], -p[..., 1]], axis=-1)
+
+
+def volume_offset_m(drift_m: Any, anchor_m: Any, tile_m: float, up_axis: int = 1) -> np.ndarray:
+    """Where to put the tiled volumes: the wind's drift, plus whole tiles to keep the anchor central.
+
+    The field is exactly periodic, so shifting the volumes by a whole tile changes nothing a camera
+    can see -- which is what lets them follow a camera across any distance with no rebuild and no
+    seam. The drift is the continuous part: the cloud blowing past. Both in stage axes, metres;
+    the vertical component is always zero.
+    """
+    drift = np.asarray(drift_m, dtype=np.float64)
+    anchor = np.asarray(anchor_m, dtype=np.float64)
+    offset = np.zeros(3)
+    for axis in ((0, 2) if up_axis == 1 else (0, 1)):
+        tiles = math.floor((anchor[axis] - drift[axis]) / tile_m + 0.5)
+        offset[axis] = drift[axis] + tiles * tile_m
+    return offset
+
+
+def drift_velocity_m_s(speed_mps: float, direction_deg: float, factor: float, up_axis: int = 1) -> np.ndarray:
+    """Horizontal cloud velocity in stage axes: the surface wind scaled to cloud level.
+
+    ``direction_deg`` follows the wind section's convention: the direction the wind blows
+    *toward*, from +X. Wind speed grows with height through the boundary layer, so cloud-level
+    wind is typically one and a half to two times the surface value; ``factor`` is that ratio.
+    """
+    a = math.radians(direction_deg)
+    v = np.zeros(3)
+    h0, h1 = (0, 2) if up_axis == 1 else (0, 1)
+    v[h0] = speed_mps * factor * math.cos(a)
+    v[h1] = speed_mps * factor * math.sin(a)
+    return v

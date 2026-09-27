@@ -3,6 +3,50 @@
 ## [Unreleased]
 
 ### Added
+- **Clouds as path-traced volumes** (`backends/viewport/clouds_volume.py`). Under the path tracer
+  the cloud field is written to OpenVDB (the binding inside `omni.volume`) and placed as volume
+  boxes under `/WeatherFX/Clouds`, with the recipe the thermal-camera project measured to render
+  (mesh box at the grid's world bounds, no transform, `primvars:isVolume`, `OmniVolumeDensity`,
+  and the non-uniform-volume render settings, restored on detach). Clouds now have parallax, an
+  inside and a shadow. Under real-time they stay in the dome. `clouds.render_path` ("auto" by
+  default) picks by the viewport's renderer and switches when it changes.
+- Cloud controls: `lit_color`, `shadow_color` (dome), `density_scale` and `phase_bias`. On
+  volumes these are material inputs and change instantly.
+- `core/jobs.LatestJob`: slow work (the cloud field, the dome bake, the VDB files) runs in a
+  worker thread and only the newest request is kept, so the UI no longer freezes. With
+  `general.time_source = "manual"` the work stays synchronous, for deterministic frames.
+- `core/clouds.cloud_field_from_state` (cached per cloud shape), `CloudField.volume_grid` (the
+  density in stage axes, voxel for voxel the field) and `tile_placements`.
+- `examples/check_sky_and_clouds.py`: a Script Editor walkthrough of the new behaviour.
+- **Clouds drift with the wind** (`clouds.wind_factor`, 1.5 x the surface wind by default). The
+  manager integrates the drift in `step` (`context.cloud_drift_m`), so manual time is
+  deterministic; `WeatherController.cloud_drift_m()` hands it to sensor models that march the
+  field. Volumes move by one translate on `/WeatherFX/Clouds`, which also recentres them by whole
+  tiles so the camera never reaches an edge. The dome re-bakes every 250 m of drift.
+- **Auto white balance** (`sky.white_balance`, 0.9): the dome, the sun and the moon are balanced
+  by one set of gains toward the scene's white point, weighted to the direct beam as eyes and
+  cameras are (`core/sky.white_balance_gains`, `scene_illuminant`). Morning clouds are white, not
+  orange; the last minutes before sunset stay warm.
+- `core/sky.sun_colour`: the visible sun's colour from its measured colour temperature against
+  elevation (2,000 K on the horizon to 5,800 K overhead). `meteorology.beam_tint` is unchanged for
+  the thermal model.
+- **Cloud shadows under real-time** (`clouds.cast_shadow`): the sun is dimmed by the cloud's
+  transmittance toward it at the camera. The path tracer's volumes cast real shadows.
+- **A physically based atmosphere** (`core/atmosphere.py`), the technique behind Unreal's Sky
+  Atmosphere (Hillaire 2020): transmittance, multiple-scattering and sky-view tables over a round
+  planet, with Rayleigh, Mie and ozone. It is the new default (`sky.model = "atmosphere"`); the
+  Preetham fit stays selectable. Twilight comes from the geometry, the horizon brightens because a
+  grazing ray crosses a thousand kilometres of air, and the ground below the horizon is seen
+  through the same air. A clear sky builds in about 0.2 s once the tables are cached.
+- `sky.horizon_blend_deg`: fades the dome's ground into the sky over a band below the horizon,
+  replacing the hard line at the observer's five-kilometre geometric horizon.
+- `sky.aerial_perspective` (on by default): with fog off, RTX fog is driven by the sky's own haze,
+  at the visibility the turbidity implies (`atmosphere.haze_visibility_m`) and in the sky's horizon
+  colour, so distant geometry fades the way the sky does.
+- `sky.hide_scene_lights` (on by default): while the sky is authored, every light outside
+  `/WeatherFX` is hidden in the session layer, and restored on detach. A new stage's
+  `defaultLight` was a second sun.
+
 - **A rendered gallery** (`captures/gallery/`) and the script that produces it,
   `examples/capture_gallery.py`. Thirteen scenarios, two cameras, one stage with **no lights** —
   every photon comes from the sky this extension authors. The clocks are solved from the
@@ -19,6 +63,19 @@
   backlit cloud edge before anything else is.
 
 ### Changed
+- **Exposure is an incident-light meter** (`dome_exposure(image, conditions)`): it exposes for the
+  light on the ground, capped so the sky's highlights stay within three stops, and meters the sky
+  away from a 25 degree cone around the sun and moon. The sky-highlight meter exposed for the
+  moon's glow and left moonlit nights black; a full-moon night now sits about 3.6 stops under
+  noon and a moonless one about 4. Midday is unchanged (dome intensity 0.025).
+- The dome lit clouds by moonlight five times too dimly for the moon's illuminance; fixed.
+- Dragging the site, the clock or the turbidity no longer stalls the UI: the distance haze's
+  colour is computed in the background, and the stage is scanned for lights once, not per step.
+- The dome's cloud layer is marched on `clouds.dome_rows` rows (256) and upsampled, instead of at
+  the full dome resolution: a cloudy 1024-row bake went from about 90 s to about 12 s here. The
+  sun and moon lights update immediately; the dome texture follows when its bake finishes.
+- The dome exposure is re-anchored on the atmosphere's clear-noon 99th percentile (16,000 cd/m2,
+  target 400), which keeps the measured clear-noon dome intensity of 0.025.
 - **The README is a gallery and a pitch.** The reference material moved to `docs/GUIDE.md`,
   `docs/ARCHITECTURE.md` and `docs/LIMITATIONS.md`, and planned work is only in `ROADMAP.md`.
 

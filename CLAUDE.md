@@ -37,6 +37,12 @@ Adding a parameter therefore means adding one `param(...)` field and reading it 
 **Viewport effects must stay non-destructive:**
 - Fog (`backends/viewport/fog.py`) writes RTX Simple Fog carb settings and restores the originals when disabled or detached. All setting paths live in `rtx_settings.py`. Paths missing at runtime are skipped with a warning. `tools/dump_rtx_fog_settings.py` dumps the real paths for verification. Fog is driven by visibility in meters (Koschmieder, 5% contrast) times the `density_calibration` fudge factor, because RTX fog density units are not physical.
 - Rain and snow (`precipitation.py`) are a `PointInstancer` under `/WeatherFX` in the **session layer**. It follows the anchor using the toroidal wrapping volume from `core/particles.py`. Parameter changes that alter the particle distribution trigger resampling (see the `_*_SAMPLER_KEYS` tuples), while material and color changes only update the shader. Particle counts come from physics (Marshall-Palmer) thinned by `density_scale` and capped at `max_particles`.
+- Sky (`sky.py`) bakes the dome from `core/atmosphere.py` (Hillaire 2020) in a background job
+  (`core/jobs.LatestJob`) and hides the stage's own lights (`scene_lights.py`). Clouds are one
+  `CloudField` (`core/clouds.py`, also marched by the separate thermal-camera repo, so keep its API
+  stable) drawn two ways, chosen by `render_mode.py` from `/rtx/rendermode`: path-traced OpenVDB
+  volumes (`clouds_volume.py`) or painted into the dome (real-time). Slow work never runs on the
+  update thread unless `general.time_source == "manual"`.
 - Lighting (`lighting.py`) scales `UsdLux` intensities via session-layer opinions and remembers the original values to restore them.
 - Never author into the user's root layer. Handle stage units (`meters_per_unit`) and the up axis wherever geometry or positions are computed.
 

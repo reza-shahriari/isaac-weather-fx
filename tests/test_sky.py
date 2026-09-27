@@ -298,21 +298,26 @@ def _sky_at(hour, *, cover=0.0, turbidity=2.6, date="2024-06-21", height=128, se
         "clouds", enabled=cover > 0.0, cover=cover, genus="cumulus",
         temperature_c=22.0, dewpoint_c=12.0, seed=seed, cells=64, cell_m=140.0, levels=24,
     )
-    return environment_map(conditions_from_state(state), height=height)
+    conditions = conditions_from_state(state)
+    image = environment_map(conditions, height=height).view(_Sky)
+    image.conditions = conditions  # the meter needs to know where the sun and moon are
+    return image
+
+
+class _Sky(np.ndarray):
+    """An environment map that remembers the conditions it was baked from."""
 
 
 def test_a_clear_midday_sky_is_exposed_where_the_measurement_put_it():
-    """The anchor. A clear day's 99th percentile lands on the target by construction, and its
-    median lands near 300 -- the value the intensity sweep on a demo stage actually produced."""
-    from weather_fx.core.sky import DOME_HIGHLIGHT_TARGET, dome_exposure, latlong_directions
+    """The anchor: a clear midday is exposed at the 0.025 dome intensity the sweep on a demo stage
+    found, whichever meter produced it, and its sky's median lands in a legible band."""
+    from weather_fx.core.sky import dome_exposure, latlong_directions
 
     image = _sky_at(12.97, turbidity=2.1)
-    exposure = dome_exposure(image)
+    exposure = dome_exposure(image, image.conditions)
     luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
-    assert float(np.percentile(luminance, 99.0)) * exposure == pytest.approx(
-        DOME_HIGHLIGHT_TARGET, rel=0.02
-    )
-    assert 200.0 < float(np.median(luminance)) * exposure < 420.0
+    assert exposure == pytest.approx(0.025, rel=0.05)
+    assert 100.0 < float(np.median(luminance)) * exposure < 250.0
 
 
 def test_a_sunset_does_not_clip_the_way_a_median_meter_made_it():
@@ -324,7 +329,7 @@ def test_a_sunset_does_not_clip_the_way_a_median_meter_made_it():
     peaks = []
     for image in (noon, sunset):
         luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
-        peaks.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image))
+        peaks.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image, image.conditions))
     assert peaks[1] < 1.15 * peaks[0]
 
 
@@ -337,9 +342,9 @@ def test_civil_twilight_does_not_run_the_exposure_to_its_clamp():
     image = _sky_at(20.5, cover=0.3, turbidity=3.0)
     luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
     peak = float(np.percentile(luminance, 99.0))
-    # The trap is real: half the sky is unlit, so the median is five orders below the highlights.
-    assert float(np.median(luminance)) < 1e-5 * peak
-    rendered = peak * dome_exposure(image)
+    # The trap is real: the median is orders of magnitude below the highlights.
+    assert float(np.median(luminance)) < 1e-2 * peak
+    rendered = peak * dome_exposure(image, image.conditions)
     assert 50.0 < rendered < 450.0
 
 
@@ -353,7 +358,7 @@ def test_the_day_stays_brighter_than_the_night_by_a_legible_margin():
                               (20.5, 0.3, "2024-06-21"), (0.83, 0.25, "2024-07-23")):
         image = _sky_at(hour, cover=cover, date=date)
         luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
-        rendered.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image))
+        rendered.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image, image.conditions))
     assert all(a > b for a, b in zip(rendered, rendered[1:])), rendered
     assert rendered[0] / rendered[-1] > 4.0     # night is clearly night
     assert rendered[0] / rendered[-1] < 100.0   # and not simply black

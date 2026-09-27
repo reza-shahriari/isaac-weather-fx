@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Dict
 
+from ..core.clouds import drift_velocity_m_s
 from ..core.events import Signal
 from ..core.presets import build_preset
 from ..core.state import SECTION_TYPES, WeatherState
@@ -91,11 +92,23 @@ class WeatherManager:
             return
         dt = dt * self._state.general.time_scale
         self.time += dt
+        self._advance_cloud_drift(dt)
         for backend in self._backends.values():
             try:
                 backend.update(dt, self.time)
             except Exception:
                 log.exception("weather_fx: backend %s failed to update", backend.name)
+
+    def _advance_cloud_drift(self, dt: float) -> None:
+        clouds, wind = self._state.clouds, self._state.wind
+        if not clouds.enabled or clouds.wind_factor <= 0.0 or wind.speed_mps <= 0.0:
+            return
+        try:
+            up_axis = self.context.up_axis()
+        except Exception:
+            up_axis = 2
+        self.context.cloud_drift_m = self.context.cloud_drift_m + drift_velocity_m_s(
+            wind.speed_mps, wind.direction_deg, clouds.wind_factor, up_axis) * dt
 
     # ------------------------------------------------------------ misc
     def stats(self) -> dict:

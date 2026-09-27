@@ -18,11 +18,6 @@
   `/WeatherFX` is hidden in the session layer, and restored on detach. A new stage's
   `defaultLight` was a second sun.
 
-### Changed
-- The dome exposure is re-anchored on the atmosphere's clear-noon 99th percentile (16,000 cd/m2,
-  target 400), which keeps the measured clear-noon dome intensity of 0.025.
-
-### Added (earlier)
 - **A rendered gallery** (`captures/gallery/`) and the script that produces it,
   `examples/capture_gallery.py`. Thirteen scenarios, two cameras, one stage with **no lights** —
   every photon comes from the sky this extension authors. The clocks are solved from the
@@ -39,6 +34,8 @@
   backlit cloud edge before anything else is.
 
 ### Changed
+- The dome exposure is re-anchored on the atmosphere's clear-noon 99th percentile (16,000 cd/m2,
+  target 400), which keeps the measured clear-noon dome intensity of 0.025.
 - **The README is a gallery and a pitch.** The reference material moved to `docs/GUIDE.md`,
   `docs/ARCHITECTURE.md` and `docs/LIMITATIONS.md`, and planned work is only in `ROADMAP.md`.
 

@@ -3,6 +3,21 @@
 ## [Unreleased]
 
 ### Added
+- **Clouds as path-traced volumes** (`backends/viewport/clouds_volume.py`). Under the path tracer
+  the cloud field is written to OpenVDB (the binding inside `omni.volume`) and placed as volume
+  boxes under `/WeatherFX/Clouds`, with the recipe the thermal-camera project measured to render
+  (mesh box at the grid's world bounds, no transform, `primvars:isVolume`, `OmniVolumeDensity`,
+  and the non-uniform-volume render settings, restored on detach). Clouds now have parallax, an
+  inside and a shadow. Under real-time they stay in the dome. `clouds.render_path` ("auto" by
+  default) picks by the viewport's renderer and switches when it changes.
+- Cloud controls: `lit_color`, `shadow_color` (dome), `density_scale` and `phase_bias`. On
+  volumes these are material inputs and change instantly.
+- `core/jobs.LatestJob`: slow work (the cloud field, the dome bake, the VDB files) runs in a
+  worker thread and only the newest request is kept, so the UI no longer freezes. With
+  `general.time_source = "manual"` the work stays synchronous, for deterministic frames.
+- `core/clouds.cloud_field_from_state` (cached per cloud shape), `CloudField.volume_grid` (the
+  density in stage axes, voxel for voxel the field) and `tile_placements`.
+- `examples/check_sky_and_clouds.py`: a Script Editor walkthrough of the new behaviour.
 - **A physically based atmosphere** (`core/atmosphere.py`), the technique behind Unreal's Sky
   Atmosphere (Hillaire 2020): transmittance, multiple-scattering and sky-view tables over a round
   planet, with Rayleigh, Mie and ozone. It is the new default (`sky.model = "atmosphere"`); the
@@ -34,6 +49,9 @@
   backlit cloud edge before anything else is.
 
 ### Changed
+- The dome's cloud layer is marched on `clouds.dome_rows` rows (256) and upsampled, instead of at
+  the full dome resolution: a cloudy 1024-row bake went from about 90 s to about 12 s here. The
+  sun and moon lights update immediately; the dome texture follows when its bake finishes.
 - The dome exposure is re-anchored on the atmosphere's clear-noon 99th percentile (16,000 cd/m2,
   target 400), which keeps the measured clear-noon dome intensity of 0.025.
 - **The README is a gallery and a pitch.** The reference material moved to `docs/GUIDE.md`,

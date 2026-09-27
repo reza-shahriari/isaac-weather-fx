@@ -49,7 +49,7 @@ from weather_fx.core.celestial import (
     sun_position,
 )
 from weather_fx.core import atmosphere
-from weather_fx.core.clouds import CloudField, cloud_profile, lifting_condensation_level_m
+from weather_fx.core.clouds import CloudField, cloud_field_from_state
 from weather_fx.core.meteorology import beam_tint
 
 __all__ = [
@@ -197,6 +197,13 @@ class SkyConditions:
     model: str = "atmosphere"
     #: Degrees below the horizon over which the dome's ground fades into the sky (atmosphere only).
     horizon_blend_deg: float = 4.0
+    #: Colour of the sunlit and of the self-shadowed parts of a cloud, as multipliers.
+    cloud_lit_colour: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    cloud_shadow_colour: Tuple[float, float, float] = (1.0, 1.0, 1.0)
+    #: Rows of the latitude-longitude grid the cloud is marched on before being upsampled into the
+    #: environment map. The march is the whole cost of a cloudy bake and a cloud's edges are soft,
+    #: so a quarter of the map's rows loses little and costs a sixteenth.
+    cloud_rows: int = 256
 
     @property
     def daylight(self) -> float:
@@ -239,25 +246,7 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         ) from exc
     when = day + timedelta(hours=float(sky.hour_utc))
 
-    field = None
-    if build_cloud and clouds.enabled and clouds.cover > 0.0:
-        base = clouds.base_m
-        if base <= 0.0:
-            base = lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
-        field = CloudField(
-            cover=float(clouds.cover),
-            base_m=float(base),
-            profile=cloud_profile(clouds.genus),
-            cell_m=float(clouds.cell_m),
-            cells=int(clouds.cells),
-            levels=int(clouds.levels),
-            seed=int(clouds.seed),
-            thickness_m=float(clouds.thickness_m),
-            optical_depth=float(clouds.optical_depth),
-            feature_m=float(clouds.feature_m),
-            erosion_scale=float(clouds.erosion_scale),
-            beta_scale=float(clouds.beta_scale),
-        )
+    field = cloud_field_from_state(state) if build_cloud else None
 
     return SkyConditions(
         when=when,
@@ -271,6 +260,9 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         march_steps=int(clouds.march_steps),
         model=str(getattr(sky, "model", "atmosphere")),
         horizon_blend_deg=float(getattr(sky, "horizon_blend_deg", 4.0)),
+        cloud_lit_colour=tuple(getattr(clouds, "lit_color", (1.0, 1.0, 1.0))),
+        cloud_shadow_colour=tuple(getattr(clouds, "shadow_color", (1.0, 1.0, 1.0))),
+        cloud_rows=int(getattr(clouds, "dome_rows", 256)),
     )
 
 
@@ -439,6 +431,16 @@ def _composite_cloud(
 
     The same march the infrared band uses, so the two bands cannot put cloud in different places.
     """
+    transmittance, added = _cloud_terms(directions, conditions)
+    return sky * transmittance[..., None] + added
+
+
+def _cloud_terms(directions: np.ndarray, conditions: SkyConditions) -> Tuple[np.ndarray, np.ndarray]:
+    """What the cloud does along each direction: ``(transmittance, added luminance)``.
+
+    Kept as two terms so a caller can march coarsely and upsample them without blurring the sky
+    behind the cloud: ``out = transmittance * sky + added``.
+    """
     field = conditions.cloud
     assert field is not None
     origin = np.zeros(directions.shape, dtype=np.float64)
@@ -450,7 +452,7 @@ def _composite_cloud(
         origin, directions, sun_direction=sun_direction, steps=int(conditions.march_steps)
     )
 
-    out = sky * result.transmittance[..., None]
+    added = np.zeros(directions.shape, dtype=np.float64)
     if result.radiance is not None:
         # The incident illuminance on the cloud tops, spread over the hemisphere: what the
         # albedo the march returns is a fraction *of*.
@@ -464,8 +466,27 @@ def _composite_cloud(
         else:
             source = conditions.moon_lux / math.pi * 1.0e4
             tint = np.asarray(MOONLIGHT_TINT) * reddening
-        out = out + result.radiance[..., None] * source / math.pi * tint * 1e-4
-    return out
+        added = (result.radiance[..., None] * source / math.pi * tint * 1e-4
+                 * _cloud_colour(result.radiance, result.transmittance, conditions))
+    return result.transmittance, added
+
+
+def _cloud_colour(radiance: np.ndarray, transmittance: np.ndarray, conditions: SkyConditions) -> np.ndarray:
+    """Per-pixel colour of the cloud: the shadow colour where it is self-shadowed, the lit colour
+    where the sun reaches it, blended by how lit the march found it.
+
+    "How lit" is the scattered radiance per unit of cloud opacity, which runs from the march's
+    shadow floor (a fully shadowed interior) to one (a sunlit face).
+    """
+    from weather_fx.core.clouds import MS_SHADOW_FLOOR
+
+    lit = np.asarray(conditions.cloud_lit_colour, dtype=np.float64)
+    shadow = np.asarray(conditions.cloud_shadow_colour, dtype=np.float64)
+    if np.allclose(lit, shadow):
+        return lit
+    litness = radiance / np.maximum(1.0 - transmittance, 1e-3)
+    w = np.clip((litness - MS_SHADOW_FLOOR) / (1.0 - MS_SHADOW_FLOOR), 0.0, 1.0)[..., None]
+    return shadow * (1.0 - w) + lit * w
 
 
 #: Renderer-side level the *brightest part of the sky* is exposed to, in the units an RTX dome
@@ -523,4 +544,43 @@ def environment_map(conditions: SkyConditions, height: int = 1024) -> np.ndarray
     and the encode discipline is cheaper to keep than to retrofit.
     """
     directions = latlong_directions(height)
-    return sky_radiance_rgb(directions, conditions).astype(np.float32)
+    if conditions.cloud is None or conditions.cloud_rows >= height:
+        return sky_radiance_rgb(directions, conditions).astype(np.float32)
+
+    # The clear sky at full resolution; the cloud marched on a coarser grid and upsampled. The
+    # march is the entire cost of a cloudy bake, and it scales with the texel count.
+    clear = sky_radiance_rgb(directions, _without_cloud(conditions))
+    rows = max(8, int(conditions.cloud_rows) // 2 * 2)
+    coarse_dirs = latlong_directions(rows)
+    up = coarse_dirs[..., 1] > 0.0
+    transmit = np.ones(coarse_dirs.shape[:2])
+    added = np.zeros(coarse_dirs.shape)
+    transmit[up], added[up] = _cloud_terms(coarse_dirs[up], conditions)
+    t_full = _upsample_latlong(transmit[..., None], height)[..., 0]
+    a_full = _upsample_latlong(added, height) * conditions.exposure_scale
+    above = directions[..., 1] > 0.0
+    out = clear.copy()
+    out[above] = clear[above] * t_full[above][..., None] + a_full[above]
+    return np.clip(out, 0.0, None).astype(np.float32)
+
+
+def _without_cloud(conditions: SkyConditions) -> SkyConditions:
+    from dataclasses import replace
+
+    return replace(conditions, cloud=None)
+
+
+def _upsample_latlong(image: np.ndarray, height: int) -> np.ndarray:
+    """Bilinear upsample of a lat-long map to ``height`` rows, wrapping in longitude."""
+    rows, cols = image.shape[:2]
+    width = 2 * height
+    y = np.clip((np.arange(height) + 0.5) * rows / height - 0.5, 0.0, rows - 1.0)
+    x = (np.arange(width) + 0.5) * cols / width - 0.5
+    y0 = np.minimum(np.floor(y).astype(np.int64), rows - 2)
+    fy = (y - y0)[:, None, None]
+    x0 = np.floor(x).astype(np.int64)
+    fx = (x - x0)[None, :, None]
+    x0w, x1w = x0 % cols, (x0 + 1) % cols
+    top = image[y0][:, x0w] * (1 - fx) + image[y0][:, x1w] * fx
+    bottom = image[y0 + 1][:, x0w] * (1 - fx) + image[y0 + 1][:, x1w] * fx
+    return top * (1 - fy) + bottom * fy

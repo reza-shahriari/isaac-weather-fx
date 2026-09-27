@@ -5,6 +5,7 @@ import logging
 
 from ...runtime.context import SESSION_ROOT
 from ..base import SensorBackend
+from .clouds_volume import CloudVolumeEffect
 from .fog import FogEffect
 from .lighting import LightingEffect
 from .precipitation import PrecipitationEffect
@@ -19,8 +20,9 @@ class ViewportBackend(SensorBackend):
     def __init__(self, effects=None):
         # The sky goes first: the fog and the precipitation read the lighting it authors, and an
         # effect list is applied in order.
-        self.effects = effects or [SkyEffect(), FogEffect(), PrecipitationEffect("rain"),
-                                   PrecipitationEffect("snow"), LightingEffect()]
+        self.effects = effects or [SkyEffect(), CloudVolumeEffect(), FogEffect(),
+                                   PrecipitationEffect("rain"), PrecipitationEffect("snow"),
+                                   LightingEffect()]
 
     def add_effect(self, effect) -> None:
         """Extension point: plug in your own Effect (e.g. lens droplets)."""

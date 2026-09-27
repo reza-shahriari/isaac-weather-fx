@@ -14,6 +14,8 @@ changelog = "docs/CHANGELOG.md"
 "omni.usd" = {}
 "omni.kit.viewport.utility" = {}
 "omni.kit.menu.utils" = {}
+# OpenVDB, for clouds as path-traced volumes. Optional: without it the clouds stay in the dome.
+"omni.volume" = {optional = true}
 
 [[python.module]]
 name = "weather_fx"

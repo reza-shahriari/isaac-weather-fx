@@ -187,6 +187,21 @@ class CloudParams:
     """The cloud field. One parameterisation, read by every band that looks up."""
 
     enabled: bool = param(False, "Enabled")
+    render_path: str = param("auto", "Render as", choices=("auto", "volume", "dome"),
+                             tooltip="auto: 3D volumes under the path tracer, painted into the "
+                                     "sky dome under real-time. volume / dome force one. The "
+                                     "cloud field is the same either way.")
+    lit_color: Vec3 = param((1.0, 1.0, 1.0), "Lit color", min=0.0, max=1.0, widget="color",
+                            tooltip="Colour of the sunlit parts of the cloud. The sun's own tint "
+                                    "is applied on top, so sunsets stay orange.")
+    shadow_color: Vec3 = param((0.82, 0.86, 0.95), "Shadow color", min=0.0, max=1.0,
+                               widget="color",
+                               tooltip="Colour of the self-shadowed parts. Applies to the dome "
+                                       "(real-time); under the path tracer the shadowed side is "
+                                       "whatever the scattering makes it.")
+    density_scale: float = param(1.0, "Density", min=0.05, max=10.0, log_scale=True,
+                                 tooltip="Multiplies the cloud's optical depth. Instant on "
+                                         "volumes: it is a material input, not a rebuild.")
     cover: float = param(0.35, "Sky cover", min=0.0, max=1.0,
                          tooltip="Fraction of the sky the cloud hides. This is solved for, not "
                                  "approximated: ask for 0.45 and the field measures 0.45.")
@@ -222,6 +237,16 @@ class CloudParams:
                           tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
                                   "the field tiles exactly, so there is no edge to reach.")
     seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+    volume_tiles: int = param(3, "Volume tiles", min=1, max=7, advanced=True,
+                              tooltip="The field tiles exactly; this many tiles across are placed "
+                                      "as volumes, centred on the stage origin. 3 x 15 km covers "
+                                      "the sky to about 20 km in every direction.")
+    phase_bias: float = param(0.85, "Forward scattering", min=0.0, max=0.95, advanced=True,
+                              tooltip="Henyey-Greenstein asymmetry of the volume. 0.85 is cloud "
+                                      "droplets in the visible: the bright silver lining.")
+    dome_rows: int = param(256, "Dome cloud rows", min=64, max=2048, advanced=True,
+                           tooltip="Resolution the dome's cloud layer is marched at before it is "
+                                   "upsampled (real-time path). Higher is sharper and slower.")
     march_steps: int = param(
         64, "March steps", min=16, max=512, advanced=True,
         tooltip="Samples per ray when the dome is baked. 64 is right for a viewport; a still "

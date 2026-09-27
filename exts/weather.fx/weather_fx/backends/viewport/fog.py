@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from ...core.jobs import LatestJob
 from ...core.physics import extinction_from_visibility
 from ..base import Effect
 from .rtx_settings import FOG_SETTINGS
@@ -19,6 +20,8 @@ class FogEffect(Effect):
         self._active = False
         self._beta = 0.0
         self._mode = None  # "fog", "haze" or None
+        self._haze_colours = {}
+        self._haze_job = LatestJob("weather_fx-haze")
 
     def _settings(self):
         import carb.settings
@@ -86,16 +89,32 @@ class FogEffect(Effect):
 
         sky = state.sky
         conditions = conditions_from_state(state, build_cloud=False)
-        atm = atmosphere_for(sky.turbidity, sky.ground_albedo)
         # Half-degree steps: the colour changes slowly, and a table per step is cached.
         elevation = round(max(conditions.sun.elevation_deg, -18.0) * 2.0) / 2.0
-        colour = sky_view(atm, elevation).horizon_colour()
-        peak = float(max(colour.max(), 1e-12))
+        key = (round(float(sky.turbidity), 3), tuple(sky.ground_albedo), elevation)
+        colour = self._haze_colours.get(key)
+        if colour is None and key != self._haze_job.running_key:
+            # A new sun position or turbidity costs a sky table (0.2 s, or 1.3 s for a new
+            # turbidity): computed in the background so dragging the site or the clock never
+            # stalls the UI. The previous colour stays until it lands.
+            turbidity, albedo = float(sky.turbidity), tuple(sky.ground_albedo)
+
+            def compute():
+                return sky_view(atmosphere_for(turbidity, albedo), elevation).horizon_colour()
+
+            if state.general.time_source == "manual":
+                self._haze_job.cancel()
+                colour = compute()
+                self._remember_colour(key, colour)
+            else:
+                self._haze_job.submit(key, compute)
 
         mpu = self.context.meters_per_unit()
         self._beta = extinction_from_visibility(haze_visibility_m(sky.turbidity))
         self._write("enabled", True)
-        self._write("color", tuple(float(c) / peak for c in colour))
+        if colour is not None:
+            peak = float(max(colour.max(), 1e-12))
+            self._write("color", tuple(float(c) / peak for c in colour))
         self._write("color_intensity", 1.0)
         self._write("z_up", self.context.up_axis() == 2)
         self._write("start_distance", 0.0)
@@ -104,6 +123,24 @@ class FogEffect(Effect):
         self._write("height_density", 0.0)
         self._active = True
         self._mode = "haze"
+
+    def update(self, dt, t):
+        try:
+            done = self._haze_job.poll()
+        except Exception:
+            log.exception("weather_fx: computing the haze colour failed")
+            return
+        if done is None:
+            return
+        key, colour = done
+        self._remember_colour(key, colour)
+        if self._mode == "haze":
+            self._apply_haze(self.context.state)
+
+    def _remember_colour(self, key, colour):
+        if len(self._haze_colours) > 256:
+            self._haze_colours.clear()
+        self._haze_colours[key] = colour
 
     def _restore(self):
         if not self._originals:

@@ -23,6 +23,13 @@
   deterministic; `WeatherController.cloud_drift_m()` hands it to sensor models that march the
   field. Volumes move by one translate on `/WeatherFX/Clouds`, which also recentres them by whole
   tiles so the camera never reaches an edge. The dome re-bakes every 250 m of drift.
+- **Auto white balance** (`sky.white_balance`, 0.9): the dome, the sun and the moon are balanced
+  by one set of gains toward the scene's white point, weighted to the direct beam as eyes and
+  cameras are (`core/sky.white_balance_gains`, `scene_illuminant`). Morning clouds are white, not
+  orange; the last minutes before sunset stay warm.
+- `core/sky.sun_colour`: the visible sun's colour from its measured colour temperature against
+  elevation (2,000 K on the horizon to 5,800 K overhead). `meteorology.beam_tint` is unchanged for
+  the thermal model.
 - **Cloud shadows under real-time** (`clouds.cast_shadow`): the sun is dimmed by the cloud's
   transmittance toward it at the camera. The path tracer's volumes cast real shadows.
 - **A physically based atmosphere** (`core/atmosphere.py`), the technique behind Unreal's Sky
@@ -56,6 +63,14 @@
   backlit cloud edge before anything else is.
 
 ### Changed
+- **Exposure is an incident-light meter** (`dome_exposure(image, conditions)`): it exposes for the
+  light on the ground, capped so the sky's highlights stay within three stops, and meters the sky
+  away from a 25 degree cone around the sun and moon. The sky-highlight meter exposed for the
+  moon's glow and left moonlit nights black; a full-moon night now sits about 3.6 stops under
+  noon and a moonless one about 4. Midday is unchanged (dome intensity 0.025).
+- The dome lit clouds by moonlight five times too dimly for the moon's illuminance; fixed.
+- Dragging the site, the clock or the turbidity no longer stalls the UI: the distance haze's
+  colour is computed in the background, and the stage is scanned for lights once, not per step.
 - The dome's cloud layer is marched on `clouds.dome_rows` rows (256) and upsampled, instead of at
   the full dome resolution: a cloudy 1024-row bake went from about 90 s to about 12 s here. The
   sun and moon lights update immediately; the dome texture follows when its bake finishes.

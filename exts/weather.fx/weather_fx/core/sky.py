@@ -62,6 +62,9 @@ __all__ = [
     "sky_luminance_cd_m2",
     "sky_radiance_rgb",
     "dome_exposure",
+    "scene_illuminant",
+    "sun_colour",
+    "white_balance_gains",
     "environment_map",
 ]
 
@@ -463,13 +466,15 @@ def _cloud_terms(directions: np.ndarray, conditions: SkyConditions) -> Tuple[np.
         # albedo the march returns is a fraction *of*.
         # The beam that lights the cloud is the beam that reached it, and at a low sun that beam
         # is orange. A cloud is white; everything people photograph at sunset is this tint.
-        reddening = np.asarray(beam_tint(lit_by.elevation_deg, conditions.turbidity))
+        reddening = sun_colour(lit_by.elevation_deg, conditions.turbidity)
         if lit_by is conditions.sun:
             source = 1.6e9 * math.sin(math.radians(max(lit_by.elevation_deg, 0.0)))
             source *= conditions.daylight
             tint = reddening
         else:
-            source = conditions.moon_lux / math.pi * 1.0e4
+            # The same scale as the sun's line above, which is 1.6e4 per lux of *horizontal*
+            # illuminance -- and moon_lux is horizontal. (It was 1e4/pi: five times too dark.)
+            source = 1.6e4 * conditions.moon_lux
             tint = np.asarray(MOONLIGHT_TINT) * reddening
         added = (result.radiance[..., None] * source / math.pi * tint * 1e-4
                  * _cloud_colour(result.radiance, result.transmittance, conditions))
@@ -497,14 +502,14 @@ def _cloud_colour(radiance: np.ndarray, transmittance: np.ndarray, conditions: S
 #: Renderer-side level the *brightest part of the sky* is exposed to, in the units an RTX dome
 #: light's `intensity` multiplies its texture by. Measured by sweeping the intensity on a demo
 #: stage: a clear midday sky renders correctly at an intensity near 0.025 -- which also sets the
-#: sun, exposed by the same factor, and so the brightness of sunlit ground. Re-anchored when the
-#: default model became the physical atmosphere so that intensity is unchanged: 0.025 times the
-#: atmosphere's clear-noon 99th percentile below.
-DOME_HIGHLIGHT_TARGET = 400.0
-#: The 99th-percentile luminance of a clear midday sky, cd/m2 -- the anchor the adaptation is
-#: written about. Measured from the atmosphere model at a 65 degree sun, turbidity 2.1 (the
-#: Preetham fit put it at 20,000: its sky is brighter away from the sun and has no aureole).
-DAYLIGHT_REFERENCE_CD_M2 = 16_000.0
+#: sun, exposed by the same factor, and so the brightness of sunlit ground. The two constants
+#: below are anchored so that intensity is unchanged: 0.025 times the reference.
+DOME_HIGHLIGHT_TARGET = 217.5
+#: The metered 99th-percentile luminance of a clear midday sky, cd/m2 -- the anchor the adaptation
+#: is written about. Measured from the atmosphere model at a 65 degree sun, turbidity 2.1, with the
+#: cone around the sun excluded (METER_EXCLUSION_DEG). The Preetham fit, metered with the aureole
+#: included, put it at 20,000.
+DAYLIGHT_REFERENCE_CD_M2 = 8_700.0
 #: How completely the exposure adapts to the scene. **A tone decision, stated rather than hidden.**
 #: The sky spans seven decades between noon and a moonless night and a display spans two, so
 #: something has to compress it: 1.0 exposes every frame to the same brightness and a moonlit
@@ -514,7 +519,145 @@ DAYLIGHT_REFERENCE_CD_M2 = 16_000.0
 EXPOSURE_ADAPTATION = 0.83
 
 
-def dome_exposure(image: np.ndarray) -> float:
+#: Half-angle of the cone around the sun and the moon that the exposure meter ignores, degrees.
+#: The aureole inside it is the brightest part of any sky, and at night it is *all* the meter saw:
+#: a full moon's glow set the exposure and left the rest of the sky and the landscape black --
+#: a moonless night measured brighter than a moonlit one.
+METER_EXCLUSION_DEG = 25.0
+#: Rec. 709 luminance weights, for linear sRGB.
+LUMA = np.array([0.2126, 0.7152, 0.0722])
+
+
+#: The direct sun's correlated colour temperature at a high sun, kelvin: what the viewport's
+#: colours are balanced to, so a midday sun renders white.
+SUN_CCT_HIGH_K = 5_800.0
+#: The sun's colour temperature at the horizon, kelvin.
+SUN_CCT_HORIZON_K = 2_000.0
+#: Elevation scale of the approach from one to the other, degrees, at turbidity 2.8.
+SUN_CCT_SCALE_DEG = 12.0
+
+
+def _planck_srgb(cct_k: float) -> np.ndarray:
+    """Linear sRGB of a blackbody at ``cct_k``, unit luminance (Kim et al. 2002 Planckian locus)."""
+    t = float(np.clip(cct_k, 1_667.0, 25_000.0))
+    if t <= 4_000.0:
+        x = -0.2661239e9 / t**3 - 0.2343589e6 / t**2 + 0.8776956e3 / t + 0.179910
+    else:
+        x = -3.0258469e9 / t**3 + 2.1070379e6 / t**2 + 0.2226347e3 / t + 0.240390
+    if t <= 2_222.0:
+        y = -1.1063814 * x**3 - 1.34811020 * x**2 + 2.18555832 * x - 0.20219683
+    elif t <= 4_000.0:
+        y = -0.9549476 * x**3 - 1.37418593 * x**2 + 2.09137015 * x - 0.16748867
+    else:
+        y = 3.0817580 * x**3 - 5.87338670 * x**2 + 3.75112997 * x - 0.37001483
+    return _xyy_to_linear_rgb(1.0, x, y)
+
+
+def sun_colour(elevation_deg: float, turbidity: float = 2.8) -> np.ndarray:
+    """Colour of direct sunlight as a camera balanced for a high sun records it. Unit luminance.
+
+    From the sun's measured colour temperature, which climbs from about 2,000 K on the horizon
+    through 3,300 K at 5 degrees and 4,100 K at 10 to 5,100 K at 20 and 5,800 K overhead; haze
+    slows the climb. :func:`weather_fx.core.meteorology.beam_tint` computes the reddening from
+    first principles at the three primaries' single wavelengths, which puts a 10 degree sun near
+    3,000 K and turned every morning cloud orange; the visible rendering uses this instead, and
+    the thermal model keeps ``beam_tint``, which it was calibrated with.
+    """
+    scale = SUN_CCT_SCALE_DEG * math.sqrt(max(float(turbidity), 1.0) / 2.8)
+    el = max(float(elevation_deg), 0.0)
+    cct = SUN_CCT_HIGH_K - (SUN_CCT_HIGH_K - SUN_CCT_HORIZON_K) * math.exp(-el / scale)
+    rgb = _planck_srgb(cct) / _planck_srgb(SUN_CCT_HIGH_K)
+    return rgb / float(rgb @ LUMA)
+
+
+#: How much the sky's own light counts toward the white point, against the direct beam. Eyes and
+#: cameras adapt to the brightest white in view -- a sunlit cloud, sunlit ground -- far more than
+#: to the blue fill from the sky; weighting them equally cancels the warm sun against the blue sky
+#: and leaves a morning's sunlit clouds orange, which nobody sees.
+WHITE_POINT_SKY_WEIGHT = 0.25
+
+
+def scene_illuminant(image: np.ndarray, conditions: SkyConditions,
+                     sky_weight: float = 1.0) -> np.ndarray:
+    """RGB illuminance on a horizontal surface: the sky in ``image`` plus the sun and moon beams.
+
+    With ``sky_weight`` 1 it is the light the scene is lit by, which is what the exposure meters.
+    With WHITE_POINT_SKY_WEIGHT it is the white point a camera's balance settles on. The beams use
+    the same formulas the viewport's lights do.
+    """
+    from weather_fx.core.meteorology import clear_sky_irradiance
+
+    directions = latlong_directions(image.shape[0])
+    up = np.clip(directions[..., 1], 0.0, None)
+    rows = image.shape[0]
+    # Each texel's solid angle on a lat-long map: (pi/rows) * (2 pi / 2rows) * sin(polar angle).
+    polar = (np.arange(rows) + 0.5) * (math.pi / rows)
+    solid = (math.pi / rows) ** 2 * np.sin(polar)[:, None]
+    sky = (image * (up * solid)[..., None]).sum(axis=(0, 1))
+
+    total = sky.astype(np.float64) * float(sky_weight)
+    sun = conditions.sun
+    if sun.elevation_deg > 0.0:
+        beam = (float(clear_sky_irradiance(sun.elevation_deg, conditions.turbidity)[0])
+                * LUMINOUS_EFFICACY_DAYLIGHT * conditions.daylight
+                * math.sin(math.radians(sun.elevation_deg)))
+        total = total + sun_colour(sun.elevation_deg, conditions.turbidity) * beam
+    moon = conditions.moon
+    if moon.is_up and conditions.moon_lux > 0.0:
+        tint = sun_colour(moon.elevation_deg, conditions.turbidity) * MOONLIGHT_TINT
+        total = total + tint * conditions.moon_lux
+    return total
+
+
+def white_balance_gains(illuminant: Any, strength: float) -> np.ndarray:
+    """Per-channel gains that pull ``illuminant`` toward neutral, luminance-preserving.
+
+    ``strength`` 1 is a camera's full auto white balance (every light source rendered white);
+    0 leaves the light as the physics made it. Real cameras and eyes sit in between -- a sunset
+    still reads warm -- which is why the default is below 1.
+    """
+    ill = np.maximum(np.asarray(illuminant, dtype=np.float64), 1e-12)
+    y = float(ill @ LUMA)
+    if y <= 0.0 or strength <= 0.0:
+        return np.ones(3)
+    gains = (y / ill) ** float(np.clip(strength, 0.0, 1.0))
+    # Keep the balanced illuminant's luminance where it was: white balance changes colour, not level.
+    gains /= float((gains * ill) @ LUMA) / y
+    return gains
+
+
+#: Illuminance on the ground under a clear midday sky (65 degree sun, turbidity 2.1), lux, and the
+#: dome intensity measured to render it correctly on the demo stage. The incident meter below is
+#: anchored on this pair, so midday is exactly what it was.
+INCIDENT_REFERENCE_LUX = 100_000.0
+EXPOSURE_AT_REFERENCE = 0.025
+#: How far the metered sky highlights may go above DOME_HIGHLIGHT_TARGET before they cap the
+#: exposure: 8 is three stops. Exposing for a sunset's dim ground would otherwise blow out the sky.
+HIGHLIGHT_HEADROOM = 8.0
+
+
+def dome_exposure(image: np.ndarray, conditions: Optional[SkyConditions] = None) -> float:
+    """The dome and light intensity that puts the scene where a camera would put it.
+
+    With ``conditions`` it is an **incident-light meter**: it exposes for the light falling on the
+    ground (sky plus sun or moon, :func:`scene_illuminant`), adapted by EXPOSURE_ADAPTATION, and
+    capped so the sky's highlights -- metered away from the sun and moon -- stay within
+    HIGHLIGHT_HEADROOM of the target. Metering the scene's light rather than the sky's brightest
+    patch is what keeps a moonlit landscape readable: the sky meter exposed for the moon's glow and
+    left everything else black.
+
+    Without ``conditions`` it falls back to the sky-highlight meter alone.
+    """
+    highlight = _highlight_exposure(image, conditions)
+    if conditions is None:
+        return highlight
+    lux = float(scene_illuminant(image, conditions) @ LUMA)
+    incident = EXPOSURE_AT_REFERENCE * (
+        INCIDENT_REFERENCE_LUX / max(lux, 1e-9)) ** EXPOSURE_ADAPTATION
+    return float(np.clip(min(incident, HIGHLIGHT_HEADROOM * highlight), 1e-6, 1e9))
+
+
+def _highlight_exposure(image: np.ndarray, conditions: Optional[SkyConditions] = None) -> float:
     """The dome-light intensity that puts ``image`` (cd/m2) where a camera would put it.
 
     **Meter on the highlights, not on the middle.** A median is the wrong statistic for a sky and
@@ -530,6 +673,12 @@ def dome_exposure(image: np.ndarray) -> float:
     """
     directions = latlong_directions(image.shape[0])
     above = directions[..., 1] > 0.0
+    if conditions is not None:
+        cos_limit = math.cos(math.radians(METER_EXCLUSION_DEG))
+        for body in (conditions.sun, conditions.moon):
+            if body.elevation_deg > -METER_EXCLUSION_DEG:
+                toward = np.asarray(body.direction(), dtype=np.float64)
+                above &= (directions @ toward) < cos_limit
     luminance = image[above].mean(axis=-1) if np.any(above) else np.asarray([1.0])
     bright = float(np.percentile(luminance, 99.0))
     adapted = DAYLIGHT_REFERENCE_CD_M2 * (

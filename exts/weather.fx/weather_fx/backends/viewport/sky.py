@@ -39,10 +39,14 @@ from typing import Any, Optional, Set
 
 import numpy as np
 
-from ...core.meteorology import beam_tint, clear_sky_irradiance
+from ...core.meteorology import clear_sky_irradiance
 from ...core.sky import (
+    WHITE_POINT_SKY_WEIGHT,
     SkyConditions,
     dome_exposure,
+    scene_illuminant,
+    sun_colour,
+    white_balance_gains,
     conditions_from_state,
     environment_map,
 )
@@ -74,7 +78,8 @@ class SkyEffect(Effect):
     #: intensity scale, say -- re-aims the lights without paying for a rebake.
     _BAKE_KEYS = (
         ("sky", ("model", "horizon_blend_deg", "latitude_deg", "longitude_deg", "date_utc",
-                 "hour_utc", "turbidity", "ground_albedo", "star_intensity", "dome_resolution")),
+                 "hour_utc", "turbidity", "ground_albedo", "star_intensity", "dome_resolution",
+                 "white_balance")),
     )
     #: Cloud parameters the dome depends on -- only when the clouds are painted into it. Under the
     #: path tracer they are volumes and the dome is clear sky, so a cloud edit costs it nothing.
@@ -98,6 +103,7 @@ class SkyEffect(Effect):
         self._watcher: Optional[RenderModeWatcher] = None
         self._baked_conditions: Optional[SkyConditions] = None
         self._sun_base = 0.0
+        self._gains = (1.0, 1.0, 1.0)
         self._shadow = 1.0
         self._shadow_clock = 0.0
 
@@ -144,8 +150,9 @@ class SkyEffect(Effect):
         self._author(stage, state, self._conditions)
         self._authored = True
         if state.sky.hide_scene_lights:
-            # A change to the sky section itself is the moment to catch lights added since.
-            self._scene_lights.suppress(stage, rescan="sky" in changed and rebake)
+            # One stage traversal when the sky is switched on (or the whole state is re-applied),
+            # not one per slider tick: dragging the site or the clock re-bakes on every step.
+            self._scene_lights.suppress(stage, rescan="general" in changed)
         else:
             self._scene_lights.restore()
 
@@ -237,6 +244,7 @@ class SkyEffect(Effect):
         self._exposure = result["exposure"]
         self._baked_key = result["key"]
         self._baked_conditions = result["conditions"]
+        self._gains = result.get("gains", (1.0, 1.0, 1.0))
         if previous is not None and previous != self._texture_path:
             # The renderer may still hold the old one; a temp file is the OS's problem after that.
             _unlink(previous)
@@ -299,6 +307,7 @@ class SkyEffect(Effect):
             ),
             "baking": self._job.busy,
             "sun_through_cloud": round(self._shadow, 3),
+            "white_balance_gains": [round(g, 3) for g in self._gains],
             "texture": str(self._texture_path) if self._texture_path else None,
         }
 
@@ -334,11 +343,15 @@ class SkyEffect(Effect):
         # light is exactly as bright as the irradiance says and exactly as orange as the airmass
         # says. Without this a scene at a four-degree sun is merely dim, which is the one thing a
         # sunset is not.
-        sun_tint = beam_tint(conditions.sun.elevation_deg, conditions.turbidity)
+        # The white balance the dome was baked with goes on the lights too (see `_bake`).
+        gains = self._gains
+        sun_tint = tuple(t * g for t, g in zip(
+            sun_colour(conditions.sun.elevation_deg, conditions.turbidity), gains))
         sun_peak = max(sun_tint) or 1.0
         moon_tint = tuple(
-            a * b for a, b in zip(beam_tint(conditions.moon.elevation_deg, conditions.turbidity),
-                                  (0.84, 0.90, 1.0))
+            a * b * g for a, b, g in zip(
+                sun_colour(conditions.moon.elevation_deg, conditions.turbidity),
+                (0.84, 0.90, 1.0), gains)
         )
         moon_peak = max(moon_tint) or 1.0
 
@@ -477,8 +490,16 @@ def _bake(state: Any, key: str, path: str, directory: pathlib.Path, rows: Option
     conditions = replace(conditions_from_state(state, build_cloud=(path == "dome")),
                          cloud_offset_m=tuple(offset))
     image = environment_map(conditions, height=int(rows or state.sky.dome_resolution))
+    exposure = dome_exposure(image, conditions)
+    # The camera's white balance, from the light the scene is actually lit by. The same gains go
+    # on the sun and the moon in `_author`, so the sky, the clouds and every lit surface shift
+    # together -- which is what a camera does and what a per-object tint cannot.
+    gains = white_balance_gains(
+        scene_illuminant(image, conditions, sky_weight=WHITE_POINT_SKY_WEIGHT),
+        float(state.sky.white_balance))
+    image = (image * gains.astype(np.float32)).astype(np.float32)
     directory.mkdir(parents=True, exist_ok=True)
     texture = directory / f"weather_fx_sky_{os.getpid()}_{key[:18]}.exr"
     write_exr(texture, image)
-    return {"texture": texture, "exposure": dome_exposure(image), "key": key,
-            "conditions": conditions}
+    return {"texture": texture, "exposure": exposure, "key": key,
+            "conditions": conditions, "gains": tuple(float(g) for g in gains)}

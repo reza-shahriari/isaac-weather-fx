@@ -152,6 +152,11 @@ class SkyParams:
                        tooltip="atmosphere: physically based scattering over a round planet "
                                "(Hillaire 2020, the model behind Unreal's Sky Atmosphere). "
                                "preetham: the older analytic fit, kept for comparison.")
+    white_balance: float = param(0.9, "Auto white balance", min=0.0, max=1.0,
+                                 tooltip="How far the camera neutralises the colour of the light, "
+                                         "as a real camera or eye does. 1 renders every light "
+                                         "source white; 0 is the raw physics (orange mornings, "
+                                         "blue nights). The last minutes before sunset stay warm.")
     horizon_blend_deg: float = param(4.0, "Horizon blend", min=0.0, max=20.0, unit="deg",
                                      tooltip="How far below the horizon the dome's ground fades "
                                              "into the sky. 0 is the bare model: a sharp line "

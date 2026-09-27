@@ -79,3 +79,70 @@ def test_the_sky_is_finite_and_non_negative_through_the_whole_day():
 def test_both_models_remain_selectable(model):
     state = WeatherState().with_updates("sky", model=model)
     assert conditions_from_state(state).model == model
+
+
+# --- camera: white balance, sun colour, exposure --------------------------------------------------
+
+from weather_fx.core.sky import (  # noqa: E402
+    LUMA as SKY_LUMA,
+    WHITE_POINT_SKY_WEIGHT,
+    dome_exposure,
+    scene_illuminant,
+    sun_colour,
+    white_balance_gains,
+)
+
+
+def _scene(hour, date="2024-06-21"):
+    state = WeatherState().with_updates("sky", hour_utc=hour, date_utc=date,
+                                        latitude_deg=48.14, longitude_deg=11.58)
+    conditions = conditions_from_state(state, build_cloud=False)
+    return conditions, environment_map(conditions, height=96)
+
+
+def test_the_sun_warms_toward_the_horizon_and_is_white_overhead():
+    blue_to_red = [float(sun_colour(el)[2] / sun_colour(el)[0]) for el in (2, 5, 10, 20, 60)]
+    assert blue_to_red == sorted(blue_to_red)
+    high = sun_colour(60.0)
+    assert high.max() / high.min() < 1.05
+    for el in (1.0, 10.0, 60.0):
+        assert float(sun_colour(el) @ SKY_LUMA) == pytest.approx(1.0, rel=1e-6)
+
+
+def test_white_balance_changes_colour_and_not_level():
+    gains = white_balance_gains((1.0, 0.7, 0.4), 1.0)
+    balanced = gains * np.array([1.0, 0.7, 0.4])
+    assert balanced.max() / balanced.min() == pytest.approx(1.0, rel=1e-6)
+    assert float(balanced @ SKY_LUMA) == pytest.approx(float(np.array([1.0, 0.7, 0.4]) @ SKY_LUMA))
+    assert np.allclose(white_balance_gains((1.0, 0.7, 0.4), 0.0), 1.0)
+
+
+def test_a_morning_cloud_is_near_white_but_the_last_minutes_before_sunset_stay_warm():
+    """The complaint: clouds went fully orange early in the day, which no one ever sees."""
+    def sunlit_cloud(hour):
+        conditions, image = _scene(hour)
+        gains = white_balance_gains(
+            scene_illuminant(image, conditions, sky_weight=WHITE_POINT_SKY_WEIGHT), 0.9)
+        colour = sun_colour(conditions.sun.elevation_deg) * gains
+        return colour / colour.max(), conditions.sun.elevation_deg
+
+    morning, el = sunlit_cloud(5.3)
+    assert 14.0 < el < 22.0 and morning[2] > 0.85
+    sunset, el = sunlit_cloud(19.0)
+    assert 0.0 < el < 4.0 and sunset[2] < 0.3
+
+
+def test_a_moonlit_night_is_dark_but_readable_and_darker_than_the_day():
+    """The other complaint: night went black. Exposure follows the light on the ground, so a
+    full-moon landscape sits a few stops under noon, not seven."""
+    def rendered_ground(hour, date="2024-06-21"):
+        conditions, image = _scene(hour, date)
+        return float(scene_illuminant(image, conditions) @ SKY_LUMA) * dome_exposure(image, conditions)
+
+    noon = rendered_ground(12.97)
+    moonlit = rendered_ground(22.0)
+    moonless = rendered_ground(1.0, "2024-06-06")
+    for night in (moonlit, moonless):
+        stops = math.log2(noon / night)
+        assert 2.5 < stops < 5.5, stops
+    assert moonlit > moonless

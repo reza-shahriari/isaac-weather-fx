@@ -43,6 +43,7 @@ Adding a parameter therefore means adding one `param(...)` field and reading it 
   stable) drawn two ways, chosen by `render_mode.py` from `/rtx/rendermode`: path-traced OpenVDB
   volumes (`clouds_volume.py`) or painted into the dome (real-time). Slow work never runs on the
   update thread unless `general.time_source == "manual"`.
+- Exposure (`exposure.py`) turns on RTX histogram auto exposure while the viewport runs a real-time mode (Kit 110's RTX Real-Time is black at its fixed exposure) and restores it for the path tracer and on detach.
 - Lighting (`lighting.py`) scales `UsdLux` intensities via session-layer opinions and remembers the original values to restore them.
 - Never author into the user's root layer. Handle stage units (`meters_per_unit`) and the up axis wherever geometry or positions are computed.
 

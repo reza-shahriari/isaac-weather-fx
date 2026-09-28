@@ -74,6 +74,11 @@ def diagnose(manager: Any) -> Dict[str, Any]:
         path: settings.get(path)
         for path in ("/rtx/pathtracing/ptvol/enabled", "/rtx/pathtracing/maxBounces")
     }
+    report["exposure_settings"] = {
+        path: settings.get(path)
+        for path in ("/rtx/post/histogram/enabled", "/rtx/post/tonemap/op",
+                     "/rtx/post/tonemap/filmIso", "/rtx/post/aa/autoExposureMode")
+    }
     report["stats"] = manager.stats()
     return report
 

@@ -166,10 +166,11 @@ class SkyParams:
     exposure_scale: float = param(1.0, "Exposure", min=0.05, max=20.0, log_scale=True,
                                   tooltip="Multiplies the dome and both lights together, so the "
                                           "relative brightness of sky, sun and moon is preserved.")
-    aerial_perspective: bool = param(True, "Distance haze",
+    aerial_perspective: bool = param(False, "Distance haze",
                                      tooltip="With fog off, fade distant geometry into the sky's "
                                              "horizon colour at the visibility the turbidity "
-                                             "implies. Fog, when on, takes over.")
+                                             "implies. Fog, when on, takes over. Real-time only: "
+                                             "the path tracer ignores RTX fog.")
     hide_scene_lights: bool = param(True, "Hide scene lights",
                                     tooltip="While the sky is on, hide every light outside "
                                             "/WeatherFX (the stage's default light and dome), so "

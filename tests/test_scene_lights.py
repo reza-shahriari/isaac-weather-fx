@@ -15,3 +15,8 @@ def test_scene_lights_are_hidden_by_default_and_can_be_kept():
     assert state.sky.hide_scene_lights is True
     kept = state.with_updates("sky", hide_scene_lights=False)
     assert kept.sky.hide_scene_lights is False
+
+
+def test_distance_haze_is_opt_in():
+    """RTX fog is real-time only and fogs the dome at infinity; it stays off until asked for."""
+    assert WeatherState().sky.aerial_perspective is False

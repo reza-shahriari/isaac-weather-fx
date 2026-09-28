@@ -19,6 +19,11 @@ class WeatherContext:
         #: manager's step, so manual time drives it deterministically. Every consumer of the
         #: cloud (the volumes, the dome, the sun's shadow, a sensor model) offsets by this.
         self.cloud_drift_m = np.zeros(3)
+        #: The sky's colour just above the horizon **in renderer units** (the dome's texture times
+        #: its intensity), published by the sky effect after each bake; None while no sky is
+        #: authored. RTX fog colours are in those units too, so a fog that should match the sky
+        #: needs this -- a fog colour of about 1 next to a sky of about 150 renders black.
+        self.sky_horizon_rgb = None
 
     # ---------------------------------------------------------------- stage
     @staticmethod

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 
-from ...core.jobs import LatestJob
 from ...core.physics import extinction_from_visibility
 from ..base import Effect
 from .rtx_settings import FOG_SETTINGS
@@ -20,8 +19,7 @@ class FogEffect(Effect):
         self._active = False
         self._beta = 0.0
         self._mode = None  # "fog", "haze" or None
-        self._haze_colours = {}
-        self._haze_job = LatestJob("weather_fx-haze")
+        self._published = None  # the sky colour the settings were last written with
 
     def _settings(self):
         import carb.settings
@@ -52,19 +50,33 @@ class FogEffect(Effect):
         if fog.enabled:
             self._apply_fog(fog)
         elif state.sky.enabled and state.sky.aerial_perspective:
-            if self._mode != "haze" or {"sky", "fog", "general"} & set(changed):
-                self._apply_haze(state)
+            self._apply_haze(state)
         else:
             self._restore()
+
+    def _sky_luminance(self):
+        """The sky's horizon luminance in renderer units, or None when no sky is authored."""
+        rgb = self.context.sky_horizon_rgb
+        if rgb is None:
+            return None
+        return max(0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2], 1e-9)
 
     def _apply_fog(self, fog):
         mpu = self.context.meters_per_unit()
         self._beta = extinction_from_visibility(fog.visibility_m)
         density = self._beta * mpu * fog.density_calibration  # per stage unit
 
+        # RTX fog colours are in the renderer's units. Under the authored sky the dome is drawn at
+        # about 150 of those, so a colour of 0.7 at intensity 1 is a black fog: scale it by the
+        # sky's own horizon level and keep the user's colour as the tint. With no sky authored,
+        # the colour means what it always meant.
+        level = self._sky_luminance()
+        intensity = float(fog.color_intensity) * (level if level is not None else 1.0)
+        self._published = self.context.sky_horizon_rgb
+
         self._write("enabled", True)
         self._write("color", fog.color)
-        self._write("color_intensity", float(fog.color_intensity))
+        self._write("color_intensity", intensity)
         self._write("z_up", self.context.up_axis() == 2)
         self._write("start_distance", fog.start_distance_m / mpu)
         self._write("end_distance", fog.end_distance_m / mpu)
@@ -76,46 +88,27 @@ class FogEffect(Effect):
         self._mode = "fog"
 
     def _apply_haze(self, state):
-        """Aerial perspective: the sky's own haze on the stage's geometry.
+        """Aerial perspective: the sky's own haze on the stage's geometry (real-time only).
 
-        With no fog asked for, distant objects should still fade into the horizon the way they do
-        in the sky above them -- otherwise a building two kilometres away is as crisp as one at
-        twenty metres and meets the dome's hazy horizon at a hard edge. The extinction is the
-        visibility the turbidity implies (the same number an infrared model scales its aerosol
-        from) and the colour is the sky's own horizon.
+        The extinction is the visibility the turbidity implies (the number an infrared model
+        scales its aerosol from) and the colour is the sky's horizon, in renderer units, as the
+        sky effect measured it on the dome it baked. Until a dome exists there is nothing to
+        match, so the fog stays off rather than guessing a colour.
         """
-        from ...core.atmosphere import atmosphere_for, haze_visibility_m, sky_view
-        from ...core.sky import conditions_from_state
+        from ...core.atmosphere import haze_visibility_m
 
-        sky = state.sky
-        conditions = conditions_from_state(state, build_cloud=False)
-        # Half-degree steps: the colour changes slowly, and a table per step is cached.
-        elevation = round(max(conditions.sun.elevation_deg, -18.0) * 2.0) / 2.0
-        key = (round(float(sky.turbidity), 3), tuple(sky.ground_albedo), elevation)
-        colour = self._haze_colours.get(key)
-        if colour is None and key != self._haze_job.running_key:
-            # A new sun position or turbidity costs a sky table (0.2 s, or 1.3 s for a new
-            # turbidity): computed in the background so dragging the site or the clock never
-            # stalls the UI. The previous colour stays until it lands.
-            turbidity, albedo = float(sky.turbidity), tuple(sky.ground_albedo)
-
-            def compute():
-                return sky_view(atmosphere_for(turbidity, albedo), elevation).horizon_colour()
-
-            if state.general.time_source == "manual":
-                self._haze_job.cancel()
-                colour = compute()
-                self._remember_colour(key, colour)
-            else:
-                self._haze_job.submit(key, compute)
-
+        rgb = self.context.sky_horizon_rgb
+        self._published = rgb
+        if rgb is None:
+            self._restore()
+            self._mode = "haze"  # keep watching for the sky's colour
+            return
+        peak = max(max(rgb), 1e-9)
         mpu = self.context.meters_per_unit()
-        self._beta = extinction_from_visibility(haze_visibility_m(sky.turbidity))
+        self._beta = extinction_from_visibility(haze_visibility_m(state.sky.turbidity))
         self._write("enabled", True)
-        if colour is not None:
-            peak = float(max(colour.max(), 1e-12))
-            self._write("color", tuple(float(c) / peak for c in colour))
-        self._write("color_intensity", 1.0)
+        self._write("color", tuple(float(c) / peak for c in rgb))
+        self._write("color_intensity", float(peak))
         self._write("z_up", self.context.up_axis() == 2)
         self._write("start_distance", 0.0)
         self._write("end_distance", 200_000.0 / mpu)
@@ -125,22 +118,10 @@ class FogEffect(Effect):
         self._mode = "haze"
 
     def update(self, dt, t):
-        try:
-            done = self._haze_job.poll()
-        except Exception:
-            log.exception("weather_fx: computing the haze colour failed")
+        """Follow the sky: each new bake publishes a new horizon colour (and level)."""
+        if self._mode is None or self.context.sky_horizon_rgb == self._published:
             return
-        if done is None:
-            return
-        key, colour = done
-        self._remember_colour(key, colour)
-        if self._mode == "haze":
-            self._apply_haze(self.context.state)
-
-    def _remember_colour(self, key, colour):
-        if len(self._haze_colours) > 256:
-            self._haze_colours.clear()
-        self._haze_colours[key] = colour
+        self.apply_state(self.context.state, {"sky"})
 
     def _restore(self):
         if not self._originals:

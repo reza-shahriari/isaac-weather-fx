@@ -105,6 +105,7 @@ class SkyEffect(Effect):
         self._baked_conditions: Optional[SkyConditions] = None
         self._sun_base = 0.0
         self._gains = (1.0, 1.0, 1.0)
+        self._horizon = None
         self._shadow = 1.0
         self._shadow_clock = 0.0
 
@@ -246,9 +247,18 @@ class SkyEffect(Effect):
         self._baked_key = result["key"]
         self._baked_conditions = result["conditions"]
         self._gains = result.get("gains", (1.0, 1.0, 1.0))
+        self._horizon = result.get("horizon")
+        self._publish_horizon()
         if previous is not None and previous != self._texture_path:
             # The renderer may still hold the old one; a temp file is the OS's problem after that.
             _unlink(previous)
+
+    def _publish_horizon(self) -> None:
+        """Hand the fog the sky's horizon colour in the units the renderer draws the dome in."""
+        if self._horizon is None or not hasattr(self, "context"):
+            return
+        scale = self._exposure * float(self.context.state.sky.exposure_scale)
+        self.context.sky_horizon_rgb = tuple(c * scale for c in self._horizon)
 
     def _advance_clock(self, dt: float) -> None:
         """Advance the clock, if the state asks for it.
@@ -283,6 +293,9 @@ class SkyEffect(Effect):
                 log.exception("weather_fx: could not remove the sky prims")
         self._authored = False
         self._baked_key = None
+        self._horizon = None
+        if hasattr(self, "context"):
+            self.context.sky_horizon_rgb = None
         self._job.cancel()
         if self._texture_path is not None:
             _unlink(self._texture_path)
@@ -474,6 +487,16 @@ def _unlink(path: Any) -> None:
         log.debug("weather_fx: could not remove the sky texture %s", path)
 
 
+def _horizon_band(image: np.ndarray) -> tuple:
+    """Mean colour of the band from 0.5 to 3 degrees above the horizon, all round, cd/m2."""
+    from ...core.sky import latlong_directions
+
+    up = latlong_directions(image.shape[0])[..., 1]
+    band = (up > math.sin(math.radians(0.5))) & (up < math.sin(math.radians(3.0)))
+    colour = image[band].mean(axis=0) if np.any(band) else image.reshape(-1, 3).mean(axis=0)
+    return tuple(float(c) for c in colour)
+
+
 def _bake(state: Any, key: str, path: str, directory: pathlib.Path, rows: Optional[int] = None,
           offset: tuple = (0.0, 0.0, 0.0)) -> dict:
     """Bake the dome texture. Runs in a worker thread, so it touches nothing but its arguments.
@@ -502,6 +525,7 @@ def _bake(state: Any, key: str, path: str, directory: pathlib.Path, rows: Option
         scene_illuminant(image, conditions, sky_weight=WHITE_POINT_SKY_WEIGHT),
         float(state.sky.white_balance))
     image = (image * gains.astype(np.float32)).astype(np.float32)
+    horizon = _horizon_band(image)
     directory.mkdir(parents=True, exist_ok=True)
     # A counter, not the key: two bakes of one sky (the quick first one and the full one) must
     # never share a file, or the second overwrites the one the renderer is reading -- which is
@@ -509,4 +533,5 @@ def _bake(state: Any, key: str, path: str, directory: pathlib.Path, rows: Option
     texture = directory / f"weather_fx_sky_{os.getpid()}_{next(_BAKE_COUNTER):06d}.exr"
     write_exr(texture, image)
     return {"texture": texture, "exposure": exposure, "key": key,
-            "conditions": conditions, "gains": tuple(float(g) for g in gains)}
+            "conditions": conditions, "gains": tuple(float(g) for g in gains),
+            "horizon": horizon}

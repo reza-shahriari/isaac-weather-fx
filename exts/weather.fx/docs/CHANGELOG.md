@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- `WeatherController.diagnose()`: renderer detected, cloud path, every prim under `/WeatherFX`
+  with visibility and intensity, the dome texture and whether it exists, hidden stage lights and
+  the live RTX fog settings, in one printout.
 - **Clouds as path-traced volumes** (`backends/viewport/clouds_volume.py`). Under the path tracer
   the cloud field is written to OpenVDB (the binding inside `omni.volume`) and placed as volume
   boxes under `/WeatherFX/Clouds`, with the recipe the thermal-camera project measured to render
@@ -80,6 +83,14 @@
   `docs/ARCHITECTURE.md` and `docs/LIMITATIONS.md`, and planned work is only in `ROADMAP.md`.
 
 ### Fixed
+- **Black real-time frame.** RTX fog colours are in renderer units, where the authored dome is
+  drawn at about 150; the fog was written at intensity 1, so in real-time (the path tracer ignores
+  RTX fog) it fogged the sky at infinity, and everything distant, to black. The sky effect now
+  publishes its horizon colour in renderer units (`context.sky_horizon_rgb`) and both the user's
+  fog and the distance haze are scaled by it. Distance haze is now off by default.
+- The renderer is read from the active viewport's own render mode before `/rtx/rendermode`,
+  which the viewport menu does not update on every build (the cloud volumes stayed in a real-time
+  viewport). Mode changes are logged.
 - The quick first dome bake and the full bake of the same sky wrote the same file (the name kept
   only 18 characters of the key), so the full bake overwrote the texture the renderer was
   reading: "Unexpected data block y coordinate" from OpenEXR and a black dome. Each bake now gets

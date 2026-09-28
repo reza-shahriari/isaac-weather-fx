@@ -170,6 +170,21 @@ class WeatherController:
         self._manager.set_state(WeatherState.from_dict(data))
 
     # ------------------------------------------------------------ time and anchoring
+    def diagnose(self, show: bool = True) -> dict:
+        """Everything that decides what the viewport shows, as a dict; printed unless ``show=False``.
+
+        The renderer the extension detected and how the clouds are drawn, every prim under
+        /WeatherFX with its visibility and light intensity, whether the dome's texture exists,
+        which stage lights are hidden, and the live RTX fog settings. Paste it when a frame looks
+        wrong.
+        """
+        from .runtime.diagnostics import diagnose, format_report
+
+        report = diagnose(self._manager)
+        if show:
+            print(format_report(report))
+        return report
+
     def cloud_drift_m(self, frame: str = "field"):
         """How far the wind has carried the clouds, metres.
 

@@ -7,7 +7,10 @@ the viewport's renderer switches them. The field is the same object either way.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
+
+log = logging.getLogger("weather_fx")
 
 #: The carb setting the viewport's renderer menu writes.
 RENDER_MODE_SETTING = "/rtx/rendermode"
@@ -23,6 +26,21 @@ def choose_cloud_path(render_path: str, render_mode: Optional[str]) -> str:
 
 
 def current_render_mode() -> Optional[str]:
+    """The active viewport's render mode, e.g. ``"RaytracedLighting"`` or ``"PathTracing"``.
+
+    The viewport's own mode comes first: the renderer menu sets it per viewport, and on some
+    builds the global ``/rtx/rendermode`` setting does not follow it -- which would leave the
+    cloud volumes in a real-time viewport that cannot draw them. The setting is the fallback.
+    """
+    try:
+        from omni.kit.viewport.utility import get_active_viewport
+
+        viewport = get_active_viewport()
+        mode = getattr(viewport, "render_mode", None) if viewport is not None else None
+        if mode:
+            return str(mode)
+    except Exception:
+        pass
     try:
         import carb.settings
     except ImportError:
@@ -45,6 +63,8 @@ class RenderModeWatcher:
     def changed(self) -> bool:
         mode = current_render_mode()
         if mode != self._last:
+            log.info("weather_fx: render mode %r -> %r (clouds as %s)", self._last, mode,
+                     choose_cloud_path("auto", mode))
             self._last = mode
             return True
         return False

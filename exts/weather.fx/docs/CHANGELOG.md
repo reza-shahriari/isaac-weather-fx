@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **Real-time auto exposure** (`backends/viewport/exposure.py`, `general.realtime_auto_exposure`,
+  on by default). On Kit 110 RTX Real-Time (`RealTimePathTracing`) renders every daylight frame
+  black, with or without the weather: its fixed exposure is orders of magnitude too dark
+  (`tools/probe_realtime_renderer.py` measured it: black with the default settings, a normal frame
+  with `/rtx/post/histogram/enabled`). The extension now turns the histogram auto exposure on while
+  the viewport is in a real-time mode, and restores it for the path tracer and on detach.
 - `WeatherController.diagnose()`: renderer detected, cloud path, every prim under `/WeatherFX`
   with visibility and intensity, the dome texture and whether it exists, hidden stage lights and
   the live RTX fog settings, in one printout.

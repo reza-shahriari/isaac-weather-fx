@@ -6,6 +6,7 @@ import logging
 from ...runtime.context import SESSION_ROOT
 from ..base import SensorBackend
 from .clouds_volume import CloudVolumeEffect
+from .exposure import RealTimeExposureEffect
 from .fog import FogEffect
 from .lighting import LightingEffect
 from .precipitation import PrecipitationEffect
@@ -22,7 +23,7 @@ class ViewportBackend(SensorBackend):
         # effect list is applied in order.
         self.effects = effects or [SkyEffect(), CloudVolumeEffect(), FogEffect(),
                                    PrecipitationEffect("rain"), PrecipitationEffect("snow"),
-                                   LightingEffect()]
+                                   LightingEffect(), RealTimeExposureEffect()]
 
     def add_effect(self, effect) -> None:
         """Extension point: plug in your own Effect (e.g. lens droplets)."""

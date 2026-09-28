@@ -39,6 +39,12 @@ class GeneralParams:
                                      "manual: only when step(dt) is called (deterministic data generation).")
     time_scale: float = param(1.0, "Time scale", min=0.0, max=4.0)
     seed: int = param(0, "Random seed", min=0, max=1_000_000, advanced=True)
+    realtime_auto_exposure: bool = param(
+        True, "Real-time auto exposure",
+        tooltip="Turn on RTX auto exposure (the histogram) while the viewport is in a real-time "
+                "mode. On Kit 110 RTX Real-Time uses a fixed exposure that is far too dark for "
+                "daylight, so every frame is black. The path tracer keeps its own exposure. "
+                "Restored when the path tracer runs or the weather is turned off.")
 
 
 @dataclass

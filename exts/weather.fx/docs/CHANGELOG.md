@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Grey, faded path-traced clouds.** Three settings starved the volume of light:
+  - the droplet albedo was 0.96. Water at 0.55 um is 0.99999, and a thick cloud scatters each
+    photon hundreds of times, so 4 % per bounce darkened its whole body. Now 0.999;
+  - the delta-tracking collision limit was *lowered* from the renderer's 1024 to 128, and the
+    shadow-ray limit was 64, cutting paths off inside thick cloud. The limits are now floors
+    (1024 and 256) that never lower the user's own values;
+  - 8 volume bounces. Now `clouds.volume_bounces`, default 32.
+  `phase_bias` defaults to 0.8 (from 0.85), giving the shadowed side a little of the side and back
+  scattering that a single Henyey-Greenstein lobe lacks.
+
 ### Changed
 - **The clouds' drift is a pure function of weather time.** It was a running sum of velocity
   times frame time in the manager's update loop, which a headless render could not reproduce for

@@ -46,24 +46,32 @@ log = logging.getLogger("weather_fx")
 
 CLOUDS_ROOT = "/WeatherFX/Clouds"
 
-#: Path-tracer settings a heterogeneous volume needs (ADR 0144, ``VOLUME_SETTINGS``). The master
-#: switch is ``ptvol/enabled``; without it a volume is invisible. The collision and bounce limits
-#: are the UI's own advice for highly scattering media like cloud -- too few and a thick cloud
-#: terminates black.
+#: Path-tracer settings a heterogeneous volume needs (ADR 0144). The master switch is
+#: ``ptvol/enabled``; without it a volume is invisible. Set as given.
 VOLUME_SETTINGS = {
     "/rtx/pathtracing/ptvol/enabled": True,
     "/rtx/pathtracing/ptvol/transmittanceMethod": 0,
-    "/rtx/pathtracing/ptvol/maxCollisionCount": 128,
-    "/rtx/pathtracing/ptvol/maxLightCollisionCount": 64,
-    "/rtx/pathtracing/ptvol/maxBounces": 8,
     "/rtx/pathtracing/volumesAOV": True,
-    "/rtx/pathtracing/maxVolumeBounces": 8,
 }
-#: Raised to at least this, never lowered: the default of 3 bounces starves a scattering slab.
-MIN_PATH_BOUNCES = ("/rtx/pathtracing/maxBounces", 16)
+#: Limits raised to at least these values and **never lowered**. A cloud of optical depth 18 is a
+#: medium light crosses by hundreds of scattering events; every limit below that ends a path early
+#: and ends it dark, which is exactly the grey, faded look. The collision counts bound the
+#: delta-tracking steps through the heterogeneous grid (for camera and for shadow rays); the
+#: renderer's own default of 1024 was being *lowered* to 128 here, which cut thick clouds off.
+#: The volume bounce counts come from ``clouds.volume_bounces``.
+VOLUME_FLOORS = {
+    "/rtx/pathtracing/ptvol/maxCollisionCount": 1024,
+    "/rtx/pathtracing/ptvol/maxLightCollisionCount": 256,
+    "/rtx/pathtracing/maxBounces": 16,
+}
+#: Settings that take ``clouds.volume_bounces``.
+VOLUME_BOUNCE_SETTINGS = ("/rtx/pathtracing/ptvol/maxBounces", "/rtx/pathtracing/maxVolumeBounces")
 
-#: Single-scattering albedo of cloud droplets in the visible: water barely absorbs at 0.55 um.
-DROPLET_ALBEDO = 0.96
+#: Single-scattering albedo of cloud droplets in the visible. Liquid water at 0.55 um absorbs so
+#: little that the true value is 0.99999; it was 0.96 here, and at a few hundred scattering events
+#: per path that 4 % loss per bounce is what turned the body of a thick cloud grey. 0.999 keeps a
+#: sliver of absorption for the bounce limit to lean on.
+DROPLET_ALBEDO = 0.999
 
 
 class CloudVolumeEffect(Effect):
@@ -99,7 +107,7 @@ class CloudVolumeEffect(Effect):
             if self._active or self._built_key is not None:
                 self._teardown()
             return
-        self._enable_settings()
+        self._enable_settings(state)
         self._active = True
 
         key = self._shape_key(state)
@@ -254,7 +262,7 @@ class CloudVolumeEffect(Effect):
 
     # --- render settings ---------------------------------------------------------------
 
-    def _enable_settings(self) -> None:
+    def _enable_settings(self, state: Any) -> None:
         try:
             import carb.settings
         except ImportError:
@@ -267,11 +275,20 @@ class CloudVolumeEffect(Effect):
             self._settings.setdefault(path, current)
             if current != value:
                 settings.set(path, value)
-        path, floor = MIN_PATH_BOUNCES
-        current = settings.get(path)
-        if current is not None and int(current) < floor:
-            self._settings.setdefault(path, current)
-            settings.set(path, floor)
+        floors = dict(VOLUME_FLOORS)
+        bounces = int(state.clouds.volume_bounces)
+        for path in VOLUME_BOUNCE_SETTINGS:
+            floors[path] = bounces
+        for path, floor in floors.items():
+            current = settings.get(path)
+            if current is None:
+                continue
+            original = self._settings.setdefault(path, current)
+            # Raise to the floor, never below what the user had; a lowered volume_bounces goes
+            # back down as far as the user's own value.
+            wanted = max(int(original), int(floor))
+            if int(current) != wanted:
+                settings.set(path, wanted)
 
     def _restore_settings(self) -> None:
         if not self._settings:

@@ -271,9 +271,16 @@ class CloudParams:
                               tooltip="The field tiles exactly; this many tiles across are placed "
                                       "as volumes, centred on the stage origin. 3 x 15 km covers "
                                       "the sky to about 20 km in every direction.")
-    phase_bias: float = param(0.85, "Forward scattering", min=0.0, max=0.95, advanced=True,
-                              tooltip="Henyey-Greenstein asymmetry of the volume. 0.85 is cloud "
-                                      "droplets in the visible: the bright silver lining.")
+    phase_bias: float = param(0.8, "Forward scattering", min=0.0, max=0.95, advanced=True,
+                              tooltip="Henyey-Greenstein asymmetry of the volume. Droplets are "
+                                      "0.85 in the visible (the silver lining); 0.8 gives back a "
+                                      "little of the side and back scattering a single lobe "
+                                      "lacks, so the shadowed side is not too dark.")
+    volume_bounces: int = param(
+        32, "Volume bounces", min=4, max=256, advanced=True,
+        tooltip="Scattering events the path tracer follows inside a cloud. The white, glowing "
+                "body of a cumulus is light that has bounced hundreds of times; too few and the "
+                "cloud turns grey. Higher is brighter and slower to converge.")
     dome_rows: int = param(256, "Dome cloud rows", min=64, max=2048, advanced=True,
                            tooltip="Resolution the dome's cloud layer is marched at before it is "
                                    "upsampled (real-time path). Higher is sharper and slower.")

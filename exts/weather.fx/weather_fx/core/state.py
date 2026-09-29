@@ -257,6 +257,16 @@ class CloudParams:
                           tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
                                   "the field tiles exactly, so there is no edge to reach.")
     seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+    detail_strength: float = param(
+        0.08, "Edge detail", min=0.0, max=0.3, advanced=True,
+        tooltip="Fine (about 15 m) noise that erodes the cloud edges, on top of the 60 m grid. "
+                "0 is the soft interpolated grid; more is crisper, wispier edges. The dome, the "
+                "volumes and an infrared march all see it.")
+    volume_detail: int = param(
+        2, "Volume resolution", min=1, max=4, advanced=True,
+        tooltip="How much finer than the field's grid the path-traced volume is voxelised, so "
+                "the edge detail shows. 2 is 30 m voxels. Each step up costs about four times "
+                "the memory and build time.")
     volume_tiles: int = param(3, "Volume tiles", min=1, max=7, advanced=True,
                               tooltip="The field tiles exactly; this many tiles across are placed "
                                       "as volumes, centred on the stage origin. 3 x 15 km covers "

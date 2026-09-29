@@ -155,6 +155,7 @@ class CloudVolumeEffect(Effect):
     def _shape_key(self, state: Any) -> tuple:
         clouds = state.clouds
         return (tuple(getattr(clouds, k) for k in CLOUD_SHAPE_KEYS), int(clouds.volume_tiles),
+                int(clouds.volume_detail),
                 self.context.up_axis(), round(self.context.meters_per_unit(), 9))
 
     def _install(self, stage: Any, key: tuple, result: dict, state: Any) -> None:
@@ -301,7 +302,7 @@ def _build_volumes(state: Any, up_axis: int, mpu: float, directory: pathlib.Path
             "clouds.render_path = 'dome'"
         )
     field = cloud_field_from_state(state)
-    grid = field.volume_grid(up_axis)
+    grid = field.volume_grid(up_axis, refine=int(state.clouds.volume_detail))
     digest = hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:12]
     to_units = 1.0 / mpu
     voxel = tuple(v * to_units for v in grid.voxel_m)

@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Dict
 
-from ..core.clouds import drift_velocity_m_s
+from ..core.clouds import DriftTrack, drift_velocity_m_s
 from ..core.events import Signal
 from ..core.presets import build_preset
 from ..core.state import SECTION_TYPES, WeatherState
@@ -19,6 +19,8 @@ class WeatherManager:
         self._state = WeatherState()
         self._backends: Dict[str, object] = {}
         self.time = 0.0
+        #: The clouds' drift as a function of weather time (see core.clouds.DriftTrack).
+        self.drift = DriftTrack()
         self.context = WeatherContext(self)
         self.state_changed = Signal()  # (state_copy, changed_sections)
         self._ticker = UpdateTicker(self._on_app_update)
@@ -99,16 +101,39 @@ class WeatherManager:
             except Exception:
                 log.exception("weather_fx: backend %s failed to update", backend.name)
 
-    def _advance_cloud_drift(self, dt: float) -> None:
-        clouds, wind = self._state.clouds, self._state.wind
-        if not clouds.enabled or clouds.wind_factor <= 0.0 or wind.speed_mps <= 0.0:
-            return
+    def _advance_cloud_drift(self, dt: float = 0.0) -> None:
+        """Evaluate the drift at the current weather time. Not accumulated frame by frame: it is
+        ``DriftTrack.at(self.time)``, so a steady wind gives exactly
+        ``core.clouds.cloud_drift_from_state(state, self.time, up_axis)`` and a headless run can
+        reproduce any moment from the time alone. A wind change starts a new segment from where
+        the clouds are, so they never jump."""
+        wind = self._state.wind
         try:
             up_axis = self.context.up_axis()
         except Exception:
             up_axis = 2
-        self.context.cloud_drift_m = self.context.cloud_drift_m + drift_velocity_m_s(
-            wind.speed_mps, wind.direction_deg, clouds.wind_factor, up_axis) * dt
+        self.drift.rebase(self.time, drift_velocity_m_s(
+            wind.speed_mps, wind.direction_deg, self._state.clouds.wind_factor, up_axis))
+        self.context.cloud_drift_m = self.drift.at(self.time)
+
+    def set_time(self, elapsed_s: float) -> None:
+        """Jump weather time to ``elapsed_s`` (seconds, already scaled) and re-evaluate the drift.
+
+        For a render that has to match another process's clock -- say an infrared frame at
+        t = 42 s -- without stepping through every frame before it.
+        """
+        self.time = float(elapsed_s)
+        self._advance_cloud_drift()
+        for backend in self._backends.values():
+            try:
+                backend.update(0.0, self.time)
+            except Exception:
+                log.exception("weather_fx: backend %s failed to update", backend.name)
+
+    def reset_time(self) -> None:
+        """Weather time back to zero, and the drift to one segment from zero."""
+        self.drift.reset()
+        self.set_time(0.0)
 
     # ------------------------------------------------------------ misc
     def stats(self) -> dict:

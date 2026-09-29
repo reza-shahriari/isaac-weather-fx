@@ -24,9 +24,12 @@ is about the model as it stands.
 
 ## Cloud
 
-- The field is a **60 m grid with 400 m features** by default. Right for a sky seen from the
-  ground; soft if the camera is close enough to read individual turrets. Lower `cell_m` and
-  `feature_m` and pay for the bake.
+- The field is a **60 m grid with 400 m features** by default, with a 15 m detail noise eroding
+  the edges (`detail_strength`). The body of a cloud is still 60 m-smooth: soft if the camera is
+  close enough to read individual turrets. Lower `cell_m` and `feature_m` and pay for the bake.
+- The microphysics is **one effective size per genus**, derived water content, and a fixed ice
+  fraction. No adiabatic growth of LWC or droplet size with height, no drizzle, and no vertical
+  phase transition inside a mixed cloud (the ice fraction is uniform through it).
 - The deck **tiles horizontally**. The domain is `cells × cell_m` across — 15 km at the defaults —
   and repeats beyond that, which is visible near the horizon if you look for it.
 - Cloud scattering is a multi-octave approximation wrapped in a two-stream albedo envelope, not a

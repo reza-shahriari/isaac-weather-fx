@@ -2,7 +2,44 @@
 
 ## [Unreleased]
 
+### Changed
+- **The clouds' drift is a pure function of weather time.** It was a running sum of velocity
+  times frame time in the manager's update loop, which a headless render could not reproduce for
+  a given moment, so the thermal repo held it at zero while its own wind kept blowing. Now
+  `core.clouds.cloud_drift_at(elapsed_s, speed, direction, factor, up_axis, frame)` and
+  `cloud_drift_from_state(state, elapsed_s, up_axis, frame)` give it from the time and the wind,
+  and the manager evaluates a `DriftTrack` (one linear segment per steady wind; a wind change
+  continues from where the clouds are) at its `time` every step. For a wind set before the clock
+  starts the manager's drift equals `cloud_drift_from_state(state, t)` exactly. The drift now
+  runs whether or not the clouds are drawn. New API: `WeatherController.elapsed_s`,
+  `set_elapsed_s(t)`, `cloud_drift_at(t, frame)`; `WeatherManager.set_time(t)`, `reset_time()`.
+- **The march's jitter is a per-ray hash** of the ray direction (SplitMix64 over the float bits)
+  instead of a smooth function of it. The smooth jitter printed concentric rings through every
+  cloud (thermal repo ADR 0146); the hash turns the same residue into per-ray noise. Still
+  deterministic, still invariant to moving the observer by whole tiles; `march(jitter_seed=)`
+  changes the pattern. The dome bake gets it too.
+- **Sharper cloud edges.** With edge detail on, the field interpolates its signed distance from
+  the threshold and softens after, instead of interpolating an already-softened grid, so edges are
+  a softness-wide band rather than a 60 m ramp. Backlit rims at a low sun are brighter for it; two
+  exposure tests that include the 25 degrees around the sun (which the meter excludes) now allow
+  sunset highlights up to 1.3x noon's, against the 2.4x defect they guard.
+
 ### Added
+- **Per-genus cloud microphysics.** `CloudProfile` gains `phase` ("liquid", "ice", "mixed"),
+  `effective_radius_um`, `ice_effective_diameter_um` and `ice_fraction`, with estimated values per
+  genus (cirrus is ice, congestus mixed with a quarter of its extinction in ice).
+  `CloudField.microphysics` gives the liquid and ice water content at unit density, **derived from
+  the visible extinction** (geometric optics for water, `beta = 1.5 LWC / r_e`; Fu 1996 for ice)
+  so it cannot disagree with the visible render; `liquid_water_content(x, y, z)` and
+  `ice_water_content(x, y, z)` sample it. Conversion helpers `liquid_extinction_per_m`,
+  `liquid_water_content_g_m3`, `ice_extinction_per_m`, `ice_water_content_g_m3` are exported, so a
+  band model can compute its own coefficients from published parameterisations.
+- **Fine cloud detail** (`clouds.detail_strength`, default 0.08): a 64-cubed periodic noise at a
+  quarter of the field's cell (15 m by default), whose period divides the tile, is added to the
+  signed field near its edges at sample time. The core is untouched and every consumer of
+  `density()` -- the dome, the volumes, an infrared march -- sees the same detail.
+  `clouds.volume_detail` (default 2) voxelises the path-traced volumes that much finer
+  (30 m by default) so the detail shows; `CloudField.volume_grid(up_axis, refine)`.
 - **Real-time auto exposure** (`backends/viewport/exposure.py`, `general.realtime_auto_exposure`,
   on by default). On Kit 110 RTX Real-Time (`RealTimePathTracing`) renders every daylight frame
   black, with or without the weather: its fixed exposure is orders of magnitude too dark

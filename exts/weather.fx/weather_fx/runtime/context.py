@@ -15,9 +15,10 @@ class WeatherContext:
     def __init__(self, manager):
         self._manager = manager
         self.anchor_provider: Optional[Callable[[], object]] = None
-        #: How far the wind has carried the cloud field, stage axes, **metres**. Advanced by the
-        #: manager's step, so manual time drives it deterministically. Every consumer of the
-        #: cloud (the volumes, the dome, the sun's shadow, a sensor model) offsets by this.
+        #: How far the wind has carried the cloud field, stage axes, **metres**. The manager sets
+        #: it from its weather time on every step (a function of time, not a running sum), so
+        #: manual time drives it deterministically. Every consumer of the cloud (the volumes, the
+        #: dome, the sun's shadow, a sensor model) offsets by this.
         self.cloud_drift_m = np.zeros(3)
         #: The sky's colour just above the horizon **in renderer units** (the dome's texture times
         #: its intensity), published by the sky effect after each bake; None while no sky is

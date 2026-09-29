@@ -5,6 +5,7 @@ import logging
 
 from ...runtime.context import SESSION_ROOT
 from ..base import SensorBackend
+from .clouds_hero import HeroCloudEffect
 from .clouds_volume import CloudVolumeEffect
 from .exposure import RealTimeExposureEffect
 from .fog import FogEffect
@@ -21,7 +22,7 @@ class ViewportBackend(SensorBackend):
     def __init__(self, effects=None):
         # The sky goes first: the fog and the precipitation read the lighting it authors, and an
         # effect list is applied in order.
-        self.effects = effects or [SkyEffect(), CloudVolumeEffect(), FogEffect(),
+        self.effects = effects or [SkyEffect(), CloudVolumeEffect(), HeroCloudEffect(), FogEffect(),
                                    PrecipitationEffect("rain"), PrecipitationEffect("snow"),
                                    LightingEffect(), RealTimeExposureEffect()]
 

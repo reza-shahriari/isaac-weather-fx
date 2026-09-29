@@ -205,3 +205,10 @@ pytest                                            # no Isaac Sim needed
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Optional hero clouds use the **Walt Disney Animation Studios Cloud Data Set**, Copyright 2017
+Disney Enterprises, Inc., licensed under
+[CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/). It is not included in this
+repository; `tools/fetch_hero_cloud.py` downloads it from
+[Disney Animation](https://www.disneyanimation.com/resources/clouds/). Credit it wherever it, or an
+image rendered with it, is shown.

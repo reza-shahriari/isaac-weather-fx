@@ -28,7 +28,7 @@ import logging
 import os
 import pathlib
 import tempfile
-from typing import Any, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 import numpy as np
 
@@ -74,6 +74,71 @@ VOLUME_BOUNCE_SETTINGS = ("/rtx/pathtracing/ptvol/maxBounces", "/rtx/pathtracing
 DROPLET_ALBEDO = 0.999
 
 
+class VolumeSettingsLease:
+    """The path-tracer volume settings, shared by every effect that draws a volume.
+
+    The procedural cloud volume and the hero clouds each need them; each holding its own copy of
+    "the user's original values" would let one of them restore the renderer's defaults -- and so
+    switch volumes off -- while the other is still drawing. So the originals are captured once,
+    each owner holds a lease with the bounce depth it wants, the settings follow the largest lease,
+    and they are restored only when the last lease goes.
+    """
+
+    _leases: Dict[str, int] = {}
+    _originals: Dict[str, Any] = {}
+
+    @classmethod
+    def acquire(cls, owner: str, bounces: int) -> None:
+        cls._leases[owner] = int(bounces)
+        cls._apply()
+
+    @classmethod
+    def release(cls, owner: str) -> None:
+        if cls._leases.pop(owner, None) is None:
+            return
+        if cls._leases:
+            cls._apply()
+            return
+        try:
+            import carb.settings
+
+            settings = carb.settings.get_settings()
+            for path, value in cls._originals.items():
+                settings.set(path, value)
+        except Exception:
+            log.exception("weather_fx: could not restore the path-tracer volume settings")
+        cls._originals.clear()
+
+    @classmethod
+    def _apply(cls) -> None:
+        try:
+            import carb.settings
+        except ImportError:
+            return
+        settings = carb.settings.get_settings()
+        for path, value in VOLUME_SETTINGS.items():
+            current = settings.get(path)
+            if current is None:
+                continue
+            cls._originals.setdefault(path, current)
+            if current != value:
+                settings.set(path, value)
+        floors = dict(VOLUME_FLOORS)
+        bounces = max(cls._leases.values(), default=0)
+        for path in VOLUME_BOUNCE_SETTINGS:
+            floors[path] = bounces
+        for path, floor in floors.items():
+            current = settings.get(path)
+            if current is None:
+                continue
+            original = cls._originals.setdefault(path, current)
+            # Raise to the floor, never below what the user had; a lowered volume_bounces goes
+            # back down as far as the user's own value.
+            wanted = max(int(original), int(floor))
+            if int(current) != wanted:
+                settings.set(path, wanted)
+
+
 class CloudVolumeEffect(Effect):
     name = "cloud_volume"
 
@@ -85,7 +150,6 @@ class CloudVolumeEffect(Effect):
         self._files: List[pathlib.Path] = []
         self._shaders: List[str] = []
         self._extinction_per_m = 0.0
-        self._settings: dict = {}
         self._active = False
         self._voxels = 0
         self._tile_m = 0.0
@@ -223,24 +287,9 @@ class CloudVolumeEffect(Effect):
         """Colour, density and phase: material inputs, so they never cost a rebuild."""
         if not self._shaders:
             return
-        from pxr import Gf, Sdf, Usd, UsdShade
-
-        clouds = state.clouds
-        mpu = self.context.meters_per_unit()
         # The grid holds normalised density; the path tracer integrates it per stage unit.
-        scale = self._extinction_per_m * mpu * float(clouds.density_scale)
-        albedo = Gf.Vec3f(*(DROPLET_ALBEDO * float(c) for c in clouds.lit_color))
-        with Usd.EditContext(stage, stage.GetSessionLayer()):
-            for path in self._shaders:
-                shader = UsdShade.Shader(stage.GetPrimAtPath(path))
-                if not shader:
-                    continue
-                shader.CreateInput("volume_density_scale", Sdf.ValueTypeNames.Float).Set(float(scale))
-                tint = shader.CreateInput("volume_albedo", Sdf.ValueTypeNames.Color3f)
-                tint.Set(albedo)
-                tint.GetAttr().SetColorSpace("raw")
-                shader.CreateInput("directional_bias", Sdf.ValueTypeNames.Float).Set(
-                    float(clouds.phase_bias))
+        set_volume_inputs(stage, self._shaders, self._extinction_per_m,
+                          self.context.meters_per_unit(), state.clouds)
 
     def _teardown(self) -> None:
         self._job.cancel()
@@ -263,45 +312,10 @@ class CloudVolumeEffect(Effect):
     # --- render settings ---------------------------------------------------------------
 
     def _enable_settings(self, state: Any) -> None:
-        try:
-            import carb.settings
-        except ImportError:
-            return
-        settings = carb.settings.get_settings()
-        for path, value in VOLUME_SETTINGS.items():
-            current = settings.get(path)
-            if current is None:
-                continue
-            self._settings.setdefault(path, current)
-            if current != value:
-                settings.set(path, value)
-        floors = dict(VOLUME_FLOORS)
-        bounces = int(state.clouds.volume_bounces)
-        for path in VOLUME_BOUNCE_SETTINGS:
-            floors[path] = bounces
-        for path, floor in floors.items():
-            current = settings.get(path)
-            if current is None:
-                continue
-            original = self._settings.setdefault(path, current)
-            # Raise to the floor, never below what the user had; a lowered volume_bounces goes
-            # back down as far as the user's own value.
-            wanted = max(int(original), int(floor))
-            if int(current) != wanted:
-                settings.set(path, wanted)
+        VolumeSettingsLease.acquire(self.name, int(state.clouds.volume_bounces))
 
     def _restore_settings(self) -> None:
-        if not self._settings:
-            return
-        try:
-            import carb.settings
-
-            settings = carb.settings.get_settings()
-            for path, value in self._settings.items():
-                settings.set(path, value)
-        except Exception:
-            log.exception("weather_fx: could not restore the path-tracer volume settings")
-        self._settings.clear()
+        VolumeSettingsLease.release(self.name)
 
 
 # --------------------------------------------------------------------------- worker side
@@ -342,6 +356,26 @@ def _build_volumes(state: Any, up_axis: int, mpu: float, directory: pathlib.Path
         })
     return {"tiles": tiles, "files": files, "voxels": voxels, "tile_m": grid.tile_m,
             "extinction_per_m": field.extinction_per_m}
+
+
+def set_volume_inputs(stage: Any, shaders: List[str], extinction_per_m: float, mpu: float,
+                      clouds: Any) -> None:
+    """Density, colour and phase of a cloud volume's material: inputs, so never a rebuild."""
+    from pxr import Gf, Sdf, Usd, UsdShade
+
+    scale = float(extinction_per_m) * float(mpu) * float(clouds.density_scale)
+    albedo = Gf.Vec3f(*(DROPLET_ALBEDO * float(c) for c in clouds.lit_color))
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for path in shaders:
+            shader = UsdShade.Shader(stage.GetPrimAtPath(path))
+            if not shader:
+                continue
+            shader.CreateInput("volume_density_scale", Sdf.ValueTypeNames.Float).Set(scale)
+            tint = shader.CreateInput("volume_albedo", Sdf.ValueTypeNames.Color3f)
+            tint.Set(albedo)
+            tint.GetAttr().SetColorSpace("raw")
+            shader.CreateInput("directional_bias", Sdf.ValueTypeNames.Float).Set(
+                float(clouds.phase_bias))
 
 
 def _remove_files(files) -> None:

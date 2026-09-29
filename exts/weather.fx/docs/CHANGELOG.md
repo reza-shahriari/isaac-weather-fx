@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+- **Hero clouds** (`backends/viewport/clouds_hero.py`, `core/hero.py`): an OpenVDB cloud asset
+  placed `clouds.hero_count` times in the sky, scaled to `hero_size_m`, at `hero_base_m`, drifting
+  with the wind and wrapping within `hero_spread_m` around the camera. Path tracer only. The asset
+  is read with Kit's OpenVDB, box-filtered to `hero_max_voxels` per axis, turned to the stage's up
+  axis and written once; each cloud is a box moved by a translate. `hero_extinction_per_m` sets its
+  density; colour and phase follow the cloud section. `WeatherController.hero_clouds()` returns the
+  same clouds as a `core.hero.HeroClouds`, so an infrared march samples what the renderer draws.
+- `tools/fetch_hero_cloud.py` downloads the Walt Disney Animation Studios cloud (CC BY-SA 3.0,
+  credit required) and keeps one resolution in `~/.cache/weather_fx/clouds`, with an
+  ATTRIBUTION.txt.
+- `VolumeSettingsLease`: the path-tracer volume settings are shared by the procedural and the hero
+  volumes and restored only when neither needs them.
+
 ### Changed
 - **Cloud shape: separate, solid, billowy cumulus instead of a porous mass.** Four changes to
   `CloudField`, all shared by the dome, the volumes and an infrared march:

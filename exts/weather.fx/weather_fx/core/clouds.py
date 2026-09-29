@@ -36,10 +36,12 @@ the same array through the same :meth:`CloudField.density`. They cannot draw clo
 places, because there is only one cloud. That is the whole reason this lives in ``core`` next to
 the physics rather than inside a renderer backend.
 
-Nothing here is a microphysical model: there is no drop-size distribution, no adiabatic liquid
-water profile and no entrainment. It is a *morphology* -- the shape and the optical depth -- and
-the quantities a sensor model needs (extinction per metre, optical depth along a path) follow from
-it by construction rather than being authored twice.
+The model is a *morphology* -- the shape and the optical depth -- and the quantities a sensor
+model needs (extinction per metre, optical depth along a path) follow from it by construction
+rather than being authored twice. The microphysics is deliberately thin and derived: each genus
+states a phase and an effective particle size, and the water content is whatever reproduces the
+visible extinction (:class:`CloudMicrophysics`). There is no drop-size distribution, no adiabatic
+liquid water profile and no entrainment.
 """
 from __future__ import annotations
 
@@ -63,6 +65,16 @@ __all__ = [
     "stage_to_field",
     "volume_offset_m",
     "drift_velocity_m_s",
+    "cloud_drift_at",
+    "cloud_drift_from_state",
+    "DriftTrack",
+    "CloudMicrophysics",
+    "microphysics_for",
+    "liquid_extinction_per_m",
+    "liquid_water_content_g_m3",
+    "ice_extinction_per_m",
+    "ice_water_content_g_m3",
+    "DETAIL_STRENGTH",
 ]
 
 @dataclass(frozen=True)
@@ -100,6 +112,18 @@ class CloudProfile:
     #: Horizontal stretch applied along the wind, which is what makes cirrus streaks and
     #: stratocumulus rolls look like rolls rather than like spots.
     anisotropy: float = 1.0
+    #: Thermodynamic phase: ``"liquid"``, ``"ice"`` or ``"mixed"``. An infrared band cares far
+    #: more than a visible one: ice and water absorb differently across 8-14 um.
+    phase: str = "liquid"
+    #: Effective radius of the droplets, micrometres (the ratio of the third to the second moment
+    #: of the size distribution, which is what extinction and absorption scale with). ESTIMATED
+    #: from the in-situ ranges in Miles, Verlinde & Clothiaux (2000).
+    effective_radius_um: float = 10.0
+    #: Generalised effective size of the ice crystals, micrometres, as Fu (1996) defines it.
+    #: Only read when there is ice. ESTIMATED from Fu's observed 20-130 um range.
+    ice_effective_diameter_um: float = 60.0
+    #: Fraction of the visible extinction carried by ice. 0 for a warm cloud, 1 for cirrus.
+    ice_fraction: float = 0.0
 
 
 CLOUD_TYPES: Dict[str, CloudProfile] = {
@@ -112,6 +136,8 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=18.0,
         erosion=0.45,
         beta=2.5,
+        phase="liquid",
+        effective_radius_um=8.0,
     ),
     # Towering cumulus: deeper, narrower, and it keeps its width much higher up.
     "congestus": CloudProfile(
@@ -122,6 +148,11 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=45.0,
         erosion=0.5,
         beta=2.4,
+        # Tall enough to cross the freezing level: the top glaciates.
+        phase="mixed",
+        effective_radius_um=12.0,
+        ice_effective_diameter_um=70.0,
+        ice_fraction=0.25,
     ),
     # Stratocumulus: a broken sheet with rolls, thin and nearly uniform in the vertical.
     "stratocumulus": CloudProfile(
@@ -133,6 +164,8 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         erosion=0.25,
         beta=3.0,
         anisotropy=2.5,
+        phase="liquid",
+        effective_radius_um=10.0,
     ),
     # Stratus: a featureless sheet. The threshold barely moves, so there is no morphology at all.
     "stratus": CloudProfile(
@@ -143,6 +176,8 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=9.0,
         erosion=0.08,
         beta=3.4,
+        phase="liquid",
+        effective_radius_um=9.0,
     ),
     # Cirrus: high, thin, streaked hard along the wind, and optically shallow.
     "cirrus": CloudProfile(
@@ -154,6 +189,9 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         erosion=0.6,
         beta=2.2,
         anisotropy=6.0,
+        phase="ice",
+        ice_effective_diameter_um=60.0,
+        ice_fraction=1.0,
     ),
 }
 
@@ -162,6 +200,86 @@ def cloud_profile(name: str) -> CloudProfile:
     if name not in CLOUD_TYPES:
         raise ValueError(f"unknown cloud type {name!r}; known: {sorted(CLOUD_TYPES)}")
     return CLOUD_TYPES[name]
+
+
+#: Density of liquid water, kg/m^3.
+WATER_DENSITY_KG_M3 = 1000.0
+#: Fu (1996) ice extinction fit, ``beta = IWC * (a0 + a1 / D_ge)`` with IWC in g/m^3, D_ge in um
+#: and beta in 1/m (his eq. 3.9a). Valid for D_ge of about 20 to 130 um.
+FU1996_A0 = -6.656e-3
+FU1996_A1 = 3.686
+
+
+def liquid_extinction_per_m(lwc_g_m3: Any, effective_radius_um: Any) -> Any:
+    """Visible extinction of a water cloud from its liquid water content, per metre.
+
+    Geometric optics (extinction efficiency 2, valid for droplets much larger than the
+    wavelength): ``beta = 3 LWC / (2 rho_w r_e)``. With LWC in g/m^3 and r_e in um that is simply
+    ``1.5 LWC / r_e`` per metre (Stephens 1978; Hansen & Travis 1974).
+    """
+    return 1.5 * np.asarray(lwc_g_m3, dtype=np.float64) / np.asarray(effective_radius_um, dtype=np.float64)
+
+
+def liquid_water_content_g_m3(extinction_per_m: Any, effective_radius_um: Any) -> Any:
+    """The inverse of :func:`liquid_extinction_per_m`: LWC in g/m^3 from visible extinction."""
+    return np.asarray(extinction_per_m, dtype=np.float64) * np.asarray(effective_radius_um, dtype=np.float64) / 1.5
+
+
+def ice_extinction_per_m(iwc_g_m3: Any, effective_diameter_um: Any) -> Any:
+    """Visible extinction of an ice cloud from its ice water content, per metre (Fu 1996)."""
+    d = np.asarray(effective_diameter_um, dtype=np.float64)
+    return np.asarray(iwc_g_m3, dtype=np.float64) * (FU1996_A0 + FU1996_A1 / d)
+
+
+def ice_water_content_g_m3(extinction_per_m: Any, effective_diameter_um: Any) -> Any:
+    """The inverse of :func:`ice_extinction_per_m`: IWC in g/m^3 from visible extinction."""
+    d = np.asarray(effective_diameter_um, dtype=np.float64)
+    return np.asarray(extinction_per_m, dtype=np.float64) / (FU1996_A0 + FU1996_A1 / d)
+
+
+@dataclass(frozen=True)
+class CloudMicrophysics:
+    """What a cloud is made of, at **unit density** of its field.
+
+    The field is a morphology with a visible extinction; this is the same cloud stated as water.
+    Everything scales linearly with :meth:`CloudField.density`, so the content at a point is
+    ``density * liquid_water_g_m3`` (and likewise for ice). The water is **derived from** the
+    visible extinction and the genus' particle sizes, not authored separately, so the visible
+    render and an infrared band computed from these numbers describe the same cloud.
+
+    Not modelled: the adiabatic growth of LWC and r_e with height above the base, drizzle, and
+    any size distribution beyond its effective radius. An infrared consumer that needs more than
+    a per-genus effective size should say so; the hooks are here.
+    """
+
+    phase: str
+    #: Liquid droplet effective radius, um.
+    effective_radius_um: float
+    #: Ice generalised effective size (Fu 1996), um.
+    ice_effective_diameter_um: float
+    #: Fraction of the visible extinction carried by ice.
+    ice_fraction: float
+    #: Visible extinction at unit density, 1/m (the field's :attr:`CloudField.extinction_per_m`).
+    extinction_per_m: float
+    #: Liquid water content at unit density, g/m^3.
+    liquid_water_g_m3: float
+    #: Ice water content at unit density, g/m^3.
+    ice_water_g_m3: float
+
+
+def microphysics_for(profile: CloudProfile, extinction_per_m: float) -> CloudMicrophysics:
+    """Split a visible extinction into liquid and ice water for a genus."""
+    ice = min(max(float(profile.ice_fraction), 0.0), 1.0)
+    beta = max(float(extinction_per_m), 0.0)
+    return CloudMicrophysics(
+        phase=profile.phase,
+        effective_radius_um=float(profile.effective_radius_um),
+        ice_effective_diameter_um=float(profile.ice_effective_diameter_um),
+        ice_fraction=ice,
+        extinction_per_m=beta,
+        liquid_water_g_m3=float(liquid_water_content_g_m3((1.0 - ice) * beta, profile.effective_radius_um)),
+        ice_water_g_m3=float(ice_water_content_g_m3(ice * beta, profile.ice_effective_diameter_um)) if ice > 0 else 0.0,
+    )
 
 
 def lifting_condensation_level_m(temperature_c: float, dewpoint_c: float) -> float:
@@ -287,6 +405,36 @@ _LEVEL_RAY_LENGTH_M = 40_000.0
 _MARCH_GROWTH = 3.0
 
 
+#: Default strength of the fine detail, in threshold units (see :attr:`CloudField.detail_strength`).
+DETAIL_STRENGTH = 0.08
+#: Cells per side of the fine detail texture, and how much finer its cell is than the field's.
+_DETAIL_CELLS = 64
+_DETAIL_REFINE = 4
+
+
+def _hash_unit(*arrays: Any, seed: int = 0) -> np.ndarray:
+    """A deterministic uniform number in [0, 1) per element, from the exact bits of the inputs.
+
+    SplitMix64 over the float64 bit patterns. Neighbouring rays whose directions differ in the
+    last bit get unrelated values, which is the point: a jitter that varies *smoothly* with the
+    direction (what the march used before) prints its own contour lines -- concentric rings --
+    through every cloud. This one turns the same residue into per-ray noise.
+    """
+    arrays = np.broadcast_arrays(*[np.asarray(a, dtype=np.float64) for a in arrays])
+    shape = arrays[0].shape
+    with np.errstate(over="ignore"):
+        h = np.full(shape, np.uint64((0x9E3779B97F4A7C15 ^ (int(seed) * 0xD1B54A32D192ED03))
+                                     & 0xFFFFFFFFFFFFFFFF), dtype=np.uint64)
+        for a in arrays:
+            bits = np.array(a, dtype=np.float64, order="C").view(np.uint64)
+            z = h ^ bits
+            z = z + np.uint64(0x9E3779B97F4A7C15)
+            z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+            z = (z ^ (z >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+            h = z ^ (z >> np.uint64(31))
+    return (h >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+
+
 @dataclass
 class CloudField:
     """A periodic three-dimensional cloud, sampled in metres.
@@ -314,7 +462,20 @@ class CloudField:
     feature_m: float = 400.0
     erosion_scale: float = 1.0
     beta_scale: float = 1.0
+    #: Amplitude of the fine detail, in threshold units. The field's own grid is 60 m, so on its
+    #: own every edge is a 60 m ramp and every cloud a soft blob. A second, four-times-finer
+    #: periodic noise is added to the field's signed distance from its threshold *at sample
+    #: time*, which only matters where that distance is small -- the edge -- so the core stays as
+    #: it was and the boundary gets 15 m structure. The idea is the one real-time cloud renderers
+    #: use (Schneider 2015, and Unreal's volumetric clouds): coarse shape, fine erosion. 0 turns
+    #: it off and gives back the plain interpolated grid.
+    detail_strength: float = DETAIL_STRENGTH
     _density: np.ndarray = field(init=False, repr=False)
+    #: The eroded noise minus its level's threshold: > 0 inside the cloud. float32.
+    _signed: np.ndarray = field(init=False, repr=False, default=None)
+    #: The fine detail texture, 0..1, periodic in all three axes.
+    _detail: np.ndarray = field(init=False, repr=False, default=None)
+    _detail_cell_m: Tuple[float, float] = field(init=False, repr=False, default=(0.0, 0.0))
     _eroded: np.ndarray = field(init=False, repr=False, default=None)
     #: Per-level cut value. Held for inspection and for the tests that pin the morphology.
     _thresholds: np.ndarray = field(init=False, repr=False, default=None)
@@ -345,6 +506,8 @@ class CloudField:
             self._density = np.zeros(shape, dtype=np.float32)
             self._thresholds = np.ones(self.levels, dtype=np.float64)
             self._area_scale = 0.0
+            self._signed = None
+            self._detail = None
             return
 
         # Cell sizes in metres, which is the frame the spectrum below is shaped in.
@@ -387,6 +550,33 @@ class CloudField:
         signed = eroded - self._thresholds[:, None, None]
         self._density = np.clip(
             0.5 + signed / (2.0 * max(self.softness, 1e-6)), 0.0, 1.0
+        ).astype(np.float32)
+        # An empty level carries a threshold above its maximum; clamp so interpolation between
+        # it and a cloudy level stays a sensible boundary rather than a cliff of -inf.
+        self._signed = np.maximum(signed, -1.0).astype(np.float32)
+        self._build_detail(vertical_m, beta)
+
+    def _build_detail(self, vertical_m: float, beta: float) -> None:
+        """The fine detail texture: small, periodic, and with a period that divides the tile.
+
+        Its horizontal period is a whole fraction of the field's tile, so the detail wraps with
+        the field and the tiles still meet without a seam. Vertically it just repeats.
+        """
+        if self.detail_strength <= 0.0:
+            self._detail = None
+            return
+        tile = self.cells * self.cell_m
+        repeats = max(1, int(round(tile / (_DETAIL_CELLS * self.cell_m / _DETAIL_REFINE))))
+        horizontal = tile / repeats / _DETAIL_CELLS
+        vertical = vertical_m / 2.0
+        self._detail_cell_m = (vertical, horizontal)
+        self._detail = _periodic_fractal_noise(
+            (_DETAIL_CELLS, _DETAIL_CELLS, _DETAIL_CELLS),
+            max(beta - 0.6, 1.4),
+            self.seed + 104729,
+            cell_size_m=(vertical, horizontal, horizontal),
+            min_wavelength_m=4.0 * horizontal,
+            anisotropy=self.profile.anisotropy,
         ).astype(np.float32)
 
     @staticmethod
@@ -480,7 +670,64 @@ class CloudField:
         whole frame of rays can be sampled in one call -- which is what makes a per-pixel march
         affordable.
         """
-        return self._sample(self._density, x_m, y_m, z_m)
+        if self._detail is None or self._signed is None:
+            return self._sample(self._density, x_m, y_m, z_m)
+        x = np.asarray(x_m, dtype=np.float64)
+        y = np.asarray(y_m, dtype=np.float64)
+        z = np.asarray(z_m, dtype=np.float64)
+        x, y, z = np.broadcast_arrays(x, y, z)
+        out = np.zeros(x.shape, dtype=np.float64)
+        inside = (y >= self.base_m) & (y <= self.top_m)
+        if not np.any(inside):
+            return out
+        xi, yi, zi = x[inside], y[inside], z[inside]
+        signed = self._sample(self._signed, xi, yi, zi)
+        # Only the band near the edge can be changed by the detail; everything else is already
+        # decided, so the second lookup is paid only there.
+        softness = max(self.softness, 1e-6)
+        reach = self.detail_strength + softness
+        edge = np.abs(signed) < reach
+        if np.any(edge):
+            signed[edge] += self.detail_strength * (
+                2.0 * self._sample_detail(xi[edge], yi[edge], zi[edge]) - 1.0)
+        out[inside] = np.clip(0.5 + signed / (2.0 * softness), 0.0, 1.0)
+        return out
+
+    def _sample_detail(self, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Trilinear read of the detail texture, wrapping on all three axes."""
+        grid = self._detail
+        n = grid.shape[0]
+        dv, dh = self._detail_cell_m
+        fi = (y - self.base_m) / dv - 0.5
+        fj = z / dh - 0.5
+        fk = x / dh - 0.5
+        i0 = np.floor(fi).astype(np.int64)
+        j0 = np.floor(fj).astype(np.int64)
+        k0 = np.floor(fk).astype(np.int64)
+        ti, tj, tk = fi - i0, fj - j0, fk - k0
+        i0, i1 = i0 % n, (i0 + 1) % n
+        j0, j1 = j0 % n, (j0 + 1) % n
+        k0, k1 = k0 % n, (k0 + 1) % n
+        c00 = grid[i0, j0, k0] * (1 - tk) + grid[i0, j0, k1] * tk
+        c01 = grid[i0, j1, k0] * (1 - tk) + grid[i0, j1, k1] * tk
+        c10 = grid[i1, j0, k0] * (1 - tk) + grid[i1, j0, k1] * tk
+        c11 = grid[i1, j1, k0] * (1 - tk) + grid[i1, j1, k1] * tk
+        return (c00 * (1 - tj) + c01 * tj) * (1 - ti) + (c10 * (1 - tj) + c11 * tj) * ti
+
+    # --- microphysics ----------------------------------------------------------------------
+
+    @property
+    def microphysics(self) -> CloudMicrophysics:
+        """The cloud as water: phase, particle sizes and water content at unit density."""
+        return microphysics_for(self.profile, self.extinction_per_m)
+
+    def liquid_water_content(self, x_m: Any, y_m: Any, z_m: Any) -> np.ndarray:
+        """Liquid water content at a position, g/m^3. Zero outside the cloud."""
+        return self.density(x_m, y_m, z_m) * self.microphysics.liquid_water_g_m3
+
+    def ice_water_content(self, x_m: Any, y_m: Any, z_m: Any) -> np.ndarray:
+        """Ice water content at a position, g/m^3. Zero outside the cloud and in a warm cloud."""
+        return self.density(x_m, y_m, z_m) * self.microphysics.ice_water_g_m3
 
     def _sample(self, grid: np.ndarray, x_m: Any, y_m: Any, z_m: Any) -> np.ndarray:
         """Trilinear read of any grid shaped like the density: wrapping horizontally, clamped
@@ -523,7 +770,7 @@ class CloudField:
         out[inside] = c0 * (1 - ti) + c1 * ti
         return out
 
-    def volume_grid(self, up_axis: int = 1) -> "VolumeGrid":
+    def volume_grid(self, up_axis: int = 1, refine: int = 1) -> "VolumeGrid":
         """The density as a voxel array in **stage axes**, ready for an OpenVDB fog volume.
 
         The field's own frame is the Y-up sky frame: ``x`` east, ``y`` up, ``z`` south. A Y-up
@@ -535,18 +782,38 @@ class CloudField:
         Values are normalised density in 0..1; multiply by :attr:`extinction_per_m` for the visible
         extinction. Voxel centres sit where :meth:`density` puts its cell centres, so the grid and
         the field agree to the sample.
+
+        ``refine`` > 1 samples :meth:`density` -- detail included -- on a grid that many times
+        finer horizontally (and vertically as far as needed to keep the voxels no taller than they
+        are wide). At 1 the voxels are the field's own cells, which are too coarse to show the
+        fine detail, though they still hold what :meth:`density` returns at their centres.
         """
+        refine = max(1, int(refine))
         dv = self.thickness_m / self.levels
         half = self.half_extent_m
+        cell = self.cell_m
         grid = self._density  # (level, z, x)
+        if (refine > 1 or self._detail is not None) and self.cover > 0.0:
+            # With detail on, the voxels are sampled from density() even at the field's own
+            # resolution, so the volume still holds exactly what every other consumer samples.
+            cell = self.cell_m / refine
+            vertical_refine = 1 if refine == 1 else max(1, int(math.ceil(dv / cell - 1e-9)))
+            dv = dv / vertical_refine
+            n = self.cells * refine
+            axis = -half + (np.arange(n) + 0.5) * cell
+            zz, xx = np.meshgrid(axis, axis, indexing="ij")
+            grid = np.empty((self.levels * vertical_refine, n, n), dtype=np.float32)
+            for level in range(grid.shape[0]):
+                height = self.base_m + (level + 0.5) * dv
+                grid[level] = self.density(xx, np.full_like(xx, height), zz)
         if up_axis == 1:
             array = np.transpose(grid, (2, 0, 1))                 # (x, y_up, z)
-            voxel = (self.cell_m, dv, self.cell_m)
-            first = (-half + 0.5 * self.cell_m, self.base_m + 0.5 * dv, -half + 0.5 * self.cell_m)
+            voxel = (cell, dv, cell)
+            first = (-half + 0.5 * cell, self.base_m + 0.5 * dv, -half + 0.5 * cell)
         elif up_axis == 2:
             array = np.transpose(grid, (2, 1, 0))[:, ::-1, :]     # (x, y = -z_field, z_up)
-            voxel = (self.cell_m, self.cell_m, dv)
-            first = (-half + 0.5 * self.cell_m, -half + 0.5 * self.cell_m, self.base_m + 0.5 * dv)
+            voxel = (cell, cell, dv)
+            first = (-half + 0.5 * cell, -half + 0.5 * cell, self.base_m + 0.5 * dv)
         else:
             raise ValueError("up_axis is 1 (Y) or 2 (Z)")
         return VolumeGrid(
@@ -672,6 +939,7 @@ class CloudField:
         steps: int = 64,
         ambient: float = 0.30,
         max_path_m: float = 8000.0,
+        jitter_seed: int = 0,
     ) -> MarchResult:
         """Integrate the field along a ray, for whichever band is asking.
 
@@ -756,14 +1024,15 @@ class CloudField:
         # the cloud is already behind an optical depth of ten.
         #
         # The jitter is what turns the residue from banding into noise: the boundaries are offset
-        # by a per-ray fraction of a step, derived from the ray's own direction so it is
-        # deterministic and a frame is reproducible.
+        # by a per-ray fraction of a step. It is a **hash** of the ray's direction, bit for bit
+        # (not its origin, so moving the observer by a whole tile still changes nothing), so it
+        # is deterministic -- a frame is reproducible -- but uncorrelated
+        # between neighbouring rays. It used to be a smooth function of the direction, and a
+        # smooth jitter has contour lines: they showed up as concentric rings through every cloud
+        # in the infrared band. ``jitter_seed`` changes the pattern, for averaging several frames.
         u = np.linspace(0.0, 1.0, steps + 1)
         growth = np.expm1(_MARCH_GROWTH * u) / math.expm1(_MARCH_GROWTH)
-        jitter = (
-            np.modf(np.abs(dx) * 71.3 + np.abs(dy) * 131.7 + np.abs(dz) * 197.1)[0][..., None]
-            - 0.5
-        ) / steps
+        jitter = (_hash_unit(dx, dy, dz, seed=jitter_seed)[..., None] - 0.5) / steps
         edges = span[..., None] * np.clip(growth + jitter, 0.0, 1.0)
         edges = np.sort(edges, axis=-1)
         centres = near[..., None] + 0.5 * (edges[..., 1:] + edges[..., :-1])
@@ -861,7 +1130,7 @@ class VolumeGrid:
 CLOUD_SHAPE_KEYS = (
     "enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "thickness_m",
     "optical_depth", "feature_m", "erosion_scale", "beta_scale", "cells", "levels", "cell_m",
-    "seed",
+    "seed", "detail_strength",
 )
 
 _FIELD_CACHE: Dict[Tuple[Any, ...], "CloudField"] = {}
@@ -899,6 +1168,7 @@ def cloud_field_from_state(state: Any, build: bool = True):
         feature_m=float(clouds.feature_m),
         erosion_scale=float(clouds.erosion_scale),
         beta_scale=float(clouds.beta_scale),
+        detail_strength=float(getattr(clouds, "detail_strength", DETAIL_STRENGTH)),
     )
     while len(_FIELD_CACHE) >= 2:
         _FIELD_CACHE.pop(next(iter(_FIELD_CACHE)))
@@ -975,3 +1245,80 @@ def drift_velocity_m_s(speed_mps: float, direction_deg: float, factor: float, up
     v[h0] = speed_mps * factor * math.cos(a)
     v[h1] = speed_mps * factor * math.sin(a)
     return v
+
+
+def cloud_drift_at(elapsed_s: float, speed_mps: float, direction_deg: float, factor: float,
+                   up_axis: int = 1, frame: str = "stage") -> np.ndarray:
+    """How far a steady wind has carried the clouds after ``elapsed_s`` seconds, metres.
+
+    A pure function of time and the wind, so anyone -- the viewport, a headless render, the
+    infrared model -- gets the same drift for the same moment without having to have watched
+    every frame in between. ``frame="stage"`` gives stage axes (what the volumes move by);
+    ``frame="field"`` gives the field's own Y-up frame, which is what a sensor marching
+    :class:`CloudField` subtracts from its sample positions.
+    """
+    drift = drift_velocity_m_s(speed_mps, direction_deg, factor, up_axis) * float(elapsed_s)
+    return _in_frame(drift, up_axis, frame)
+
+
+def cloud_drift_from_state(state: Any, elapsed_s: float, up_axis: int = 1,
+                           frame: str = "stage") -> np.ndarray:
+    """:func:`cloud_drift_at` with the wind a :class:`~weather_fx.core.state.WeatherState` holds.
+
+    ``elapsed_s`` is weather time: the manager's ``time``, which is wall time scaled by
+    ``general.time_scale``. For a wind that has not changed since time zero this is exactly the
+    drift the viewport draws; see :class:`DriftTrack` for a wind changed along the way.
+    """
+    wind = state.wind
+    return cloud_drift_at(elapsed_s, wind.speed_mps, wind.direction_deg,
+                          state.clouds.wind_factor, up_axis, frame)
+
+
+def _in_frame(drift_stage: np.ndarray, up_axis: int, frame: str) -> np.ndarray:
+    if frame == "stage":
+        return drift_stage
+    if frame == "field":
+        return stage_to_field(drift_stage, up_axis)
+    raise ValueError("frame is 'stage' or 'field'")
+
+
+@dataclass
+class DriftTrack:
+    """The drift as a piecewise-linear function of time: one segment per steady wind.
+
+    A steady wind set before the clock starts is one segment from ``t = 0``, and :meth:`at` is
+    then exactly :func:`cloud_drift_at`. When the wind changes at time ``t``, :meth:`rebase` starts
+    a new segment from wherever the clouds were at ``t``, so they do not jump (a wind first set
+    ten minutes into a session starts from there rather than teleporting the clouds ten minutes'
+    worth; :meth:`reset` makes it one segment from zero again). Every value is still a
+    function of time -- evaluating it at any ``t`` in the current segment needs no history of
+    frames, and neither does a replay that applies the same wind changes at the same times.
+    """
+
+    velocity_m_s: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    origin_m: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    since_s: float = 0.0
+
+    def at(self, elapsed_s: float) -> np.ndarray:
+        """Drift in stage axes at weather time ``elapsed_s``, metres."""
+        return self.origin_m + self.velocity_m_s * (float(elapsed_s) - self.since_s)
+
+    def rebase(self, elapsed_s: float, velocity_m_s: Any) -> None:
+        """A new wind from ``elapsed_s`` on, continuing from the drift reached at that moment."""
+        velocity = np.asarray(velocity_m_s, dtype=np.float64).reshape(3)
+        if np.array_equal(velocity, self.velocity_m_s):
+            return
+        if float(elapsed_s) <= self.since_s and not np.any(self.origin_m):
+            # The clock has not moved since this segment began (a wind set before time starts):
+            # replace the segment rather than stacking a zero-length one in front of it.
+            self.velocity_m_s = velocity
+            return
+        self.origin_m = self.at(elapsed_s)
+        self.since_s = float(elapsed_s)
+        self.velocity_m_s = velocity
+
+    def reset(self, velocity_m_s: Any = (0.0, 0.0, 0.0)) -> None:
+        """Back to one segment from ``t = 0``."""
+        self.velocity_m_s = np.asarray(velocity_m_s, dtype=np.float64).reshape(3)
+        self.origin_m = np.zeros(3)
+        self.since_s = 0.0

@@ -28,7 +28,10 @@ down separately, in [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 - [ ] Wet surfaces (roughness and darkening), puddles, snow accumulation
 - [ ] Lens droplets and splashes as a camera effect
 - [ ] Fabric/USDRT writes for 100 k+ particles
-- [ ] Cloud: break the horizontal tiling, and a cheaper march so a finer grid is affordable
+- [x] Cloud: 15 m edge detail on the 60 m grid, and path-traced volumes voxelised finer to show it
+- [x] Cloud: drift as a function of time; per-genus microphysics (phase, effective size, water content)
+- [ ] Cloud: break the horizontal tiling, and a cheaper march so a finer base grid is affordable
+- [ ] Cloud: height-resolved microphysics (adiabatic LWC and r_e, a glaciating top)
 - [ ] Demo GIFs and a short benchmark table
 
 ## v0.4: other sensors

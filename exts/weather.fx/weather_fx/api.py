@@ -199,6 +199,26 @@ class WeatherController:
             return drift.copy()
         return stage_to_field(drift, self._manager.context.up_axis())
 
+    @property
+    def elapsed_s(self) -> float:
+        """Weather time in seconds: wall (or stepped) time scaled by ``general.time_scale``."""
+        return self._manager.time
+
+    def set_elapsed_s(self, elapsed_s: float) -> None:
+        """Jump weather time, and so the clouds' drift, to ``elapsed_s`` seconds."""
+        self._manager.set_time(elapsed_s)
+
+    def cloud_drift_at(self, elapsed_s: float, frame: str = "field"):
+        """The drift at weather time ``elapsed_s`` for the current wind, metres.
+
+        The same number :func:`weather_fx.core.clouds.cloud_drift_from_state` gives, with this
+        stage's up axis filled in. Exact for a wind that has not changed since time zero.
+        """
+        from .core.clouds import cloud_drift_from_state
+
+        return cloud_drift_from_state(self._manager.state_ref, elapsed_s,
+                                      self._manager.context.up_axis(), frame)
+
     def step(self, dt: float) -> None:
         """Advance the simulation manually (use with general.time_source='manual')."""
         self._manager.step(dt)

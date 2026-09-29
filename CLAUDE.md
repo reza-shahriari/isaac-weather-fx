@@ -42,7 +42,10 @@ Adding a parameter therefore means adding one `param(...)` field and reading it 
   `CloudField` (`core/clouds.py`, also marched by the separate thermal-camera repo, so keep its API
   stable) drawn two ways, chosen by `render_mode.py` from `/rtx/rendermode`: path-traced OpenVDB
   volumes (`clouds_volume.py`) or painted into the dome (real-time). Slow work never runs on the
-  update thread unless `general.time_source == "manual"`.
+  update thread unless `general.time_source == "manual"`. The clouds' drift is a function of
+  weather time (`core/clouds.cloud_drift_at` / `DriftTrack`, evaluated by the manager each step),
+  never a frame-by-frame sum, so a headless consumer can reproduce any moment. The field also
+  carries per-genus microphysics (`CloudField.microphysics`), derived from its visible extinction.
 - Exposure (`exposure.py`) turns on RTX histogram auto exposure while the viewport runs a real-time mode (Kit 110's RTX Real-Time is black at its fixed exposure) and restores it for the path tracer and on detach.
 - Lighting (`lighting.py`) scales `UsdLux` intensities via session-layer opinions and remembers the original values to restore them.
 - Never author into the user's root layer. Handle stage units (`meters_per_unit`) and the up axis wherever geometry or positions are computed.

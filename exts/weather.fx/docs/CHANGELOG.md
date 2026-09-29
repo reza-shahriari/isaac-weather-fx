@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+### Changed
+- **Cloud shape: separate, solid, billowy cumulus instead of a porous mass.** Four changes to
+  `CloudField`, all shared by the dome, the volumes and an infrared march:
+  - a **coverage map**: `CloudProfile.columnar` mixes a 2D field into the 3D noise, so a cloudy
+    column is cloudy all the way up and a cumulus body is solid. Thresholding the 3D noise level by
+    level made every cloud a sponge;
+  - **cellular (Worley) noise**: the coverage map puts one cell per thermal, about
+    `spacing * feature_m` apart, and a fractal decides how big each cloud grows. The 3D field is
+    remapped with Perlin-Worley (Schneider 2015) by `CloudProfile.billow`, giving round,
+    cauliflower-like lobes; the edge detail texture gets the same treatment. `clouds.billow_scale`
+    scales it (0 is the old fractal field). Computed at half resolution, so the field builds in
+    about 6 s instead of 3;
+  - the noise's **longest wavelength is capped** at the cloud spacing. The red spectrum put most
+    of its power in tile-sized waves, so a 30 % cover was one connected mass with scraps;
+  - **cover is counted the way it renders**: a column is cloudy when it holds a full level's
+    worth of density, with the edge detail included in the solve. Before, only a cell above one
+    half counted, and a 30 % request rendered as about 45 %.
+- **Thin cloud edges seen from below are lit by the light they transmit**, not only by what they
+  reflect toward the sun, so they glow instead of wearing a dark grey rim. Thick bodies keep their
+  previous brightness, because the dome's exposure is calibrated on them. Two march tests that
+  check reflectance now look at the layer from above, where reflectance is what you see.
+- `clouds.detail_strength` defaults to 0.04 (from 0.08): with billows on, more reads as speckle.
+
 ### Fixed
 - **Grey, faded path-traced clouds.** Three settings starved the volume of light:
   - the droplet albedo was 0.96. Water at 0.55 um is 0.99999, and a thick cloud scatters each

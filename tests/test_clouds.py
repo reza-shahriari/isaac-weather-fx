@@ -242,11 +242,30 @@ def test_a_thick_cloud_is_brighter_than_a_thin_one_which_single_scattering_canno
     dirs = np.stack(
         [rng.normal(0, 0.25, 4000), np.full(4000, 1.0), rng.normal(0, 0.25, 4000)], axis=-1
     )
-    res = f.march(np.array([0.0, 2.0, 0.0]), dirs, sun_direction=sun, steps=64)
+    # Albedo is what the lit side reflects, so look at it from the lit side: from above.
+    above = np.array([0.0, f.top_m + 200.0, 0.0])
+    res = f.march(above, dirs * np.array([1.0, -1.0, 1.0]), sun_direction=sun, steps=64)
     thin = (res.optical_depth > 2.0) & (res.optical_depth < 6.0)
     thick = res.optical_depth > 40.0
     assert thin.any() and thick.any()
     assert res.radiance[thick].mean() > 1.5 * res.radiance[thin].mean()
+
+
+def test_from_below_a_thick_base_is_darker_than_a_thin_cloud() -> None:
+    """The other face. Seen from the ground a cloud is lit by what it lets through, its diffuse
+    transmission, which a thin layer has plenty of and a thick one little: bright thin edges,
+    grey bases. Using the reflection for this side too drew a dark rim round every thin edge."""
+    f = field(cover=0.8, cells=128, levels=32)
+    sun = np.array([0.0, math.sin(math.radians(50.0)), -math.cos(math.radians(50.0))])
+    rng = np.random.default_rng(1)
+    dirs = np.stack(
+        [rng.normal(0, 0.25, 4000), np.full(4000, 1.0), rng.normal(0, 0.25, 4000)], axis=-1
+    )
+    res = f.march(np.array([0.0, 2.0, 0.0]), dirs, sun_direction=sun, steps=64)
+    thin = (res.optical_depth > 0.5) & (res.optical_depth < 3.0)
+    thick = res.optical_depth > 40.0
+    assert thin.any() and thick.any()
+    assert res.radiance[thin].mean() > res.radiance[thick].mean()
 
 
 def test_the_lit_side_approaches_the_two_stream_albedo_of_the_layer() -> None:
@@ -260,7 +279,9 @@ def test_the_lit_side_approaches_the_two_stream_albedo_of_the_layer() -> None:
     dirs = np.stack(
         [rng.normal(0, 0.3, 6000), np.full(6000, 1.0), rng.normal(0, 0.3, 6000)], axis=-1
     )
-    res = f.march(np.array([0.0, 2.0, 0.0]), dirs, sun_direction=sun, steps=64)
+    # The reflectance is the lit side's, so the layer is seen from above.
+    above = np.array([0.0, f.top_m + 200.0, 0.0])
+    res = f.march(above, dirs * np.array([1.0, -1.0, 1.0]), sun_direction=sun, steps=64)
     band = (res.optical_depth > 25.0) & (res.optical_depth < 45.0)
     assert band.any()
     mu0 = math.sin(math.radians(elevation))

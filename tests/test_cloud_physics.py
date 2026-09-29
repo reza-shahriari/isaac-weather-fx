@@ -199,3 +199,65 @@ def test_a_refined_volume_holds_the_detailed_field(up_axis):
                                field.density(fx, fy, fz), atol=1e-5)
     assert grid.low_m[1 if up_axis == 1 else 2] == pytest.approx(field.base_m)
     assert grid.high_m[1 if up_axis == 1 else 2] == pytest.approx(field.top_m)
+
+
+# --- the shape: solid bodies, billows, and a cover that means what it says ----------------------
+
+def test_every_genus_states_billow_and_columnar_amounts():
+    for name, profile in CLOUD_TYPES.items():
+        assert 0.0 <= profile.billow <= 1.0, name
+        assert 0.0 <= profile.columnar <= 1.0, name
+    assert cloud_profile("cumulus").billow > 0.5
+    assert cloud_profile("cirrus").billow == 0.0
+
+
+@pytest.mark.parametrize("detail", [0.0, 0.04])
+def test_the_requested_cover_is_the_cover_the_rendered_field_has(detail):
+    """Counted the way the render shows it -- columns holding at least a level's worth of cloud,
+    detail included -- not only where some cell is more than half dense, which let a 30 % request
+    render as 45 %."""
+    field = CloudField(cover=0.3, base_m=1000.0, profile=cloud_profile("cumulus"), cells=64,
+                       levels=16, cell_m=120.0, seed=4, detail_strength=detail)
+    grid = field.volume_grid(1).values          # density() at every cell centre
+    covered = float(np.mean(grid.sum(axis=1) >= 1.0))
+    assert covered == pytest.approx(0.3, abs=0.03)
+
+
+def test_a_cumulus_body_is_solid_rather_than_a_sponge():
+    """Inside a thick column the cloud should be cloud: few holes below the top of the tower."""
+    import dataclasses
+
+    def holes(profile):
+        field = CloudField(cover=0.4, base_m=1000.0, profile=profile, cells=64, levels=24,
+                           cell_m=100.0, seed=2)
+        grid = field._density                  # (level, z, x)
+        lower = grid[: field.levels // 3]      # the widest third, just above the base
+        column_cloudy = grid.sum(axis=0) >= 0.5 * field.levels
+        return float(np.mean(lower[:, column_cloudy] < 0.5))
+
+    cumulus = cloud_profile("cumulus")
+    sponge = holes(dataclasses.replace(cumulus, columnar=0.0))
+    solid = holes(cumulus)
+    assert solid < 0.2
+    assert solid < 0.8 * sponge
+
+
+def test_billows_change_the_shape_but_not_the_cover():
+    plain = CloudField(cover=0.35, base_m=1000.0, profile=cloud_profile("cumulus"), cells=64,
+                       levels=16, cell_m=120.0, seed=6, billow_scale=0.0)
+    billowy = CloudField(cover=0.35, base_m=1000.0, profile=cloud_profile("cumulus"), cells=64,
+                         levels=16, cell_m=120.0, seed=6, billow_scale=1.0)
+    assert plain.measured_cover == pytest.approx(billowy.measured_cover, abs=0.02)
+    assert np.mean(np.abs(plain._density - billowy._density)) > 0.01
+
+
+def test_the_fast_detail_read_at_the_centres_matches_the_trilinear_one():
+    field = CloudField(cover=0.4, base_m=1000.0, profile=cloud_profile("cumulus"), cells=32,
+                       levels=8, cell_m=100.0, seed=3)
+    half, dv = field.half_extent_m, field.thickness_m / field.levels
+    heights = field.base_m + (np.arange(field.levels) + 0.5) * dv
+    axis = -half + (np.arange(field.cells) + 0.5) * field.cell_m
+    y, z, x = np.meshgrid(heights, axis, axis, indexing="ij")
+    slow = field.detail_strength * (
+        2.0 * field._sample_detail(x.ravel(), y.ravel(), z.ravel()).reshape(y.shape) - 1.0)
+    np.testing.assert_allclose(field._detail_at_centres(), slow, atol=1e-6)

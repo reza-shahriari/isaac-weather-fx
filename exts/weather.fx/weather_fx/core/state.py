@@ -257,8 +257,13 @@ class CloudParams:
                           tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
                                   "the field tiles exactly, so there is no edge to reach.")
     seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+    billow_scale: float = param(
+        1.0, "Billowing", min=0.0, max=2.0, advanced=True,
+        tooltip="How strongly round, cauliflower lobes shape the cloud (Perlin-Worley noise). "
+                "Scales the cloud type's own amount: full for cumulus, none for cirrus. 0 is the "
+                "plain fractal field.")
     detail_strength: float = param(
-        0.08, "Edge detail", min=0.0, max=0.3, advanced=True,
+        0.04, "Edge detail", min=0.0, max=0.3, advanced=True,
         tooltip="Fine (about 15 m) noise that erodes the cloud edges, on top of the 60 m grid. "
                 "0 is the soft interpolated grid; more is crisper, wispier edges. The dome, the "
                 "volumes and an infrared march all see it.")

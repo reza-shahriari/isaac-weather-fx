@@ -27,6 +27,10 @@ is about the model as it stands.
 - The field is a **60 m grid with 400 m features** by default, with a 15 m detail noise eroding
   the edges (`detail_strength`). The body of a cloud is still 60 m-smooth: soft if the camera is
   close enough to read individual turrets. Lower `cell_m` and `feature_m` and pay for the bake.
+- **Hero clouds** are path tracer only, one asset repeated (translates only, so every copy has the
+  same orientation), and they do not shade the dome's sun or appear in the real-time dome. They
+  are not part of `CloudField`: an infrared model gets them from `WeatherController.hero_clouds()`.
+  The Disney cloud is CC BY-SA 3.0: credit it wherever it, or a render of it, is shown.
 - The microphysics is **one effective size per genus**, derived water content, and a fixed ice
   fraction. No adiabatic growth of LWC or droplet size with height, no drizzle, and no vertical
   phase transition inside a mixed cloud (the ice fraction is uniform through it).

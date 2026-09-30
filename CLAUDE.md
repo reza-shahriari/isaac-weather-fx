@@ -46,6 +46,8 @@ Adding a parameter therefore means adding one `param(...)` field and reading it 
   weather time (`core/clouds.cloud_drift_at` / `DriftTrack`, evaluated by the manager each step),
   never a frame-by-frame sum, so a headless consumer can reproduce any moment. The field also
   carries per-genus microphysics (`CloudField.microphysics`), derived from its visible extinction.
+  Hero clouds (`clouds_hero.py`, `core/hero.py`) place an OpenVDB asset a few times in the sky under
+  the path tracer; `VolumeSettingsLease` in `clouds_volume.py` shares the volume render settings.
 - Exposure (`exposure.py`) turns on RTX histogram auto exposure while the viewport runs a real-time mode (Kit 110's RTX Real-Time is black at its fixed exposure) and restores it for the path tracer and on detach.
 - Lighting (`lighting.py`) scales `UsdLux` intensities via session-layer opinions and remembers the original values to restore them.
 - Never author into the user's root layer. Handle stage units (`meters_per_unit`) and the up axis wherever geometry or positions are computed.

@@ -257,8 +257,13 @@ class CloudParams:
                           tooltip="Horizontal grid spacing. cells x cell_m is the tile width, and "
                                   "the field tiles exactly, so there is no edge to reach.")
     seed: int = param(0, "Cloud seed", min=0, max=1_000_000, advanced=True)
+    billow_scale: float = param(
+        1.0, "Billowing", min=0.0, max=2.0, advanced=True,
+        tooltip="How strongly round, cauliflower lobes shape the cloud (Perlin-Worley noise). "
+                "Scales the cloud type's own amount: full for cumulus, none for cirrus. 0 is the "
+                "plain fractal field.")
     detail_strength: float = param(
-        0.08, "Edge detail", min=0.0, max=0.3, advanced=True,
+        0.04, "Edge detail", min=0.0, max=0.3, advanced=True,
         tooltip="Fine (about 15 m) noise that erodes the cloud edges, on top of the 60 m grid. "
                 "0 is the soft interpolated grid; more is crisper, wispier edges. The dome, the "
                 "volumes and an infrared march all see it.")
@@ -267,13 +272,45 @@ class CloudParams:
         tooltip="How much finer than the field's grid the path-traced volume is voxelised, so "
                 "the edge detail shows. 2 is 30 m voxels. Each step up costs about four times "
                 "the memory and build time.")
+    hero_vdb: str = param(
+        "", "Hero cloud (.vdb)", advanced=True,
+        tooltip="An OpenVDB cloud (a 'density' fog grid) placed a few times in the sky, scaled to "
+                "a real cloud's size, for film-quality close clouds. Path tracer only. "
+                "tools/fetch_hero_cloud.py downloads the Walt Disney Animation Studios cloud "
+                "(CC BY-SA 3.0: credit it). Empty turns hero clouds off.")
+    hero_count: int = param(3, "Hero clouds", min=0, max=16, advanced=True)
+    hero_size_m: float = param(
+        2500.0, "Hero size", min=200.0, max=20000.0, unit="m", log_scale=True, advanced=True,
+        tooltip="Widest horizontal extent of each hero cloud. A fair-weather cumulus is 0.5 to "
+                "2 km across; a towering one several.")
+    hero_spread_m: float = param(
+        14000.0, "Hero spread", min=1000.0, max=60000.0, unit="m", log_scale=True, advanced=True,
+        tooltip="The hero clouds are placed in, drift through and wrap around a square this wide "
+                "around the camera.")
+    hero_base_m: float = param(
+        0.0, "Hero base", min=0.0, max=12000.0, unit="m", advanced=True,
+        tooltip="Height of the hero clouds' bottom. 0 uses the procedural cloud base.")
+    hero_extinction_per_m: float = param(
+        0.04, "Hero extinction", min=0.001, max=1.0, unit="1/m", log_scale=True, advanced=True,
+        tooltip="Visible extinction at the asset's densest voxel. 0.04 gives a 2.5 km cumulus an "
+                "optical depth of a few tens through its middle.")
+    hero_max_voxels: int = param(
+        256, "Hero resolution", min=32, max=1024, advanced=True,
+        tooltip="The asset is box-filtered down until no axis exceeds this many voxels.")
     volume_tiles: int = param(3, "Volume tiles", min=1, max=7, advanced=True,
                               tooltip="The field tiles exactly; this many tiles across are placed "
                                       "as volumes, centred on the stage origin. 3 x 15 km covers "
                                       "the sky to about 20 km in every direction.")
-    phase_bias: float = param(0.85, "Forward scattering", min=0.0, max=0.95, advanced=True,
-                              tooltip="Henyey-Greenstein asymmetry of the volume. 0.85 is cloud "
-                                      "droplets in the visible: the bright silver lining.")
+    phase_bias: float = param(0.8, "Forward scattering", min=0.0, max=0.95, advanced=True,
+                              tooltip="Henyey-Greenstein asymmetry of the volume. Droplets are "
+                                      "0.85 in the visible (the silver lining); 0.8 gives back a "
+                                      "little of the side and back scattering a single lobe "
+                                      "lacks, so the shadowed side is not too dark.")
+    volume_bounces: int = param(
+        32, "Volume bounces", min=4, max=256, advanced=True,
+        tooltip="Scattering events the path tracer follows inside a cloud. The white, glowing "
+                "body of a cumulus is light that has bounced hundreds of times; too few and the "
+                "cloud turns grey. Higher is brighter and slower to converge.")
     dome_rows: int = param(256, "Dome cloud rows", min=64, max=2048, advanced=True,
                            tooltip="Resolution the dome's cloud layer is marched at before it is "
                                    "upsampled (real-time path). Higher is sharper and slower.")

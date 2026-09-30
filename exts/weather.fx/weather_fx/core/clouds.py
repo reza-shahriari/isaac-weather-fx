@@ -112,6 +112,22 @@ class CloudProfile:
     #: Horizontal stretch applied along the wind, which is what makes cirrus streaks and
     #: stratocumulus rolls look like rolls rather than like spots.
     anisotropy: float = 1.0
+    #: How billowy the shape is, 0..1: how strongly Worley (cellular) noise rounds the field
+    #: into lobes. Cumulus towers are made of rising thermals, each a rounded bubble, and a
+    #: fractal noise alone cannot make a convex bubble -- it makes smooth ridges, which read as
+    #: smeared blobs or, cut by the height profile, as cones. 0 for a sheet or a streak.
+    billow: float = 0.0
+    #: How much of the shape comes from a **two-dimensional** coverage map (where the clouds are)
+    #: rather than from the 3D noise, 0..1. Thresholding 3D noise level by level makes a sponge:
+    #: every level is cut independently, so the inside of a cloud is riddled with holes. A real
+    #: cumulus is a solid body with its structure on the outside. Mixing in a column term that is
+    #: the same at every height makes the cores solid -- a column that is cloudy is cloudy all
+    #: the way up, until the height profile narrows it -- and leaves the 3D noise to carve the
+    #: edges. It is the coverage ("weather") map of Schneider's and Unreal's cloud renderers.
+    columnar: float = 0.0
+    #: Typical distance between neighbouring clouds, as a multiple of ``feature_m``. Sets both the
+    #: longest wave the noise carries and the spacing of the coverage map's cells.
+    spacing: float = 12.0
     #: Thermodynamic phase: ``"liquid"``, ``"ice"`` or ``"mixed"``. An infrared band cares far
     #: more than a visible one: ice and water absorb differently across 8-14 um.
     phase: str = "liquid"
@@ -136,6 +152,9 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=18.0,
         erosion=0.45,
         beta=2.5,
+        billow=1.0,
+        columnar=0.75,
+        spacing=5.0,
         phase="liquid",
         effective_radius_um=8.0,
     ),
@@ -148,6 +167,9 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=45.0,
         erosion=0.5,
         beta=2.4,
+        billow=1.0,
+        columnar=0.8,
+        spacing=6.0,
         # Tall enough to cross the freezing level: the top glaciates.
         phase="mixed",
         effective_radius_um=12.0,
@@ -164,6 +186,9 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         erosion=0.25,
         beta=3.0,
         anisotropy=2.5,
+        billow=0.6,
+        columnar=0.45,
+        spacing=6.0,
         phase="liquid",
         effective_radius_um=10.0,
     ),
@@ -176,6 +201,8 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=9.0,
         erosion=0.08,
         beta=3.4,
+        billow=0.1,
+        columnar=0.3,
         phase="liquid",
         effective_radius_um=9.0,
     ),
@@ -302,6 +329,7 @@ def _periodic_fractal_noise(
     cell_size_m: Tuple[float, float, float],
     min_wavelength_m: float,
     anisotropy: float = 1.0,
+    max_wavelength_m: float = 0.0,
 ) -> np.ndarray:
     """Band-limited ``1/f^beta`` noise on a periodic grid, normalised to 0..1 by rank.
 
@@ -339,6 +367,11 @@ def _periodic_fractal_noise(
     # smeared kilometres in the other.
     cutoff = 1.0 / max(min_wavelength_m, 2.0 * max(dx, dy, dz))
     amplitude *= np.exp(-((radius / cutoff) ** 2))
+    if max_wavelength_m > 0.0:
+        # And at the high end of the wavelengths: a red spectrum puts most of its power in the
+        # longest waves the tile allows, so a 30 % cover came out as one connected mass the size
+        # of the tile with scraps around it, rather than a field of separate clouds.
+        amplitude *= 1.0 - np.exp(-((radius * max_wavelength_m) ** 2))
     amplitude[0, 0, 0] = 0.0
 
     noise = np.fft.irfftn(spectrum * amplitude, s=shape, axes=(0, 1, 2))
@@ -346,6 +379,134 @@ def _periodic_fractal_noise(
     ranks = np.empty(flat.size, dtype=np.float64)
     ranks[np.argsort(flat, kind="stable")] = np.arange(flat.size, dtype=np.float64)
     return (ranks / max(flat.size - 1, 1)).reshape(shape)
+
+
+def _periodic_worley(
+    shape: Tuple[int, int, int],
+    lattice: Tuple[int, int, int],
+    seed: int,
+) -> np.ndarray:
+    """Inverted cellular (Worley F1) noise on a periodic grid: 1 at a feature point, 0 far away.
+
+    One jittered feature point per lattice cell; each sample takes its distance to the nearest
+    point among the 27 cells around it, with the lattice wrapped so the result tiles exactly with
+    the grid. ``lattice`` is the number of lattice cells along each axis (z, y, x); any whole
+    number keeps the period. The result is ``1 - clip(F1, 0, 1)`` in lattice units, so the bright
+    blobs are round, one per lattice cell -- the bubble a fractal noise cannot make.
+    """
+    nz, ny, nx = shape
+    lz, ly, lx = (max(1, int(n)) for n in lattice)
+    rng = np.random.default_rng(seed)
+    points = rng.random((lz, ly, lx, 3)).astype(np.float32)
+    # Sample positions in lattice units, at cell centres.
+    pz = ((np.arange(nz, dtype=np.float32) + 0.5) * (lz / nz))[:, None, None]
+    py = ((np.arange(ny, dtype=np.float32) + 0.5) * (ly / ny))[None, :, None]
+    px = ((np.arange(nx, dtype=np.float32) + 0.5) * (lx / nx))[None, None, :]
+    cz, cy, cx = np.floor(pz).astype(np.int64), np.floor(py).astype(np.int64), np.floor(px).astype(np.int64)
+    fz, fy, fx = pz - cz, py - cy, px - cx
+    best = np.full(shape, np.inf, dtype=np.float32)
+    for oz in (-1, 0, 1):
+        iz = (cz + oz) % lz
+        for oy in (-1, 0, 1):
+            iy = (cy + oy) % ly
+            for ox in (-1, 0, 1):
+                ix = (cx + ox) % lx
+                p = points[iz, iy, ix]  # broadcasts to (nz, ny, nx, 3)
+                dz = oz + p[..., 0] - fz
+                dy = oy + p[..., 1] - fy
+                dx = ox + p[..., 2] - fx
+                np.minimum(best, dz * dz + dy * dy + dx * dx, out=best)
+    return 1.0 - np.clip(np.sqrt(best), 0.0, 1.0)
+
+
+def _worley_fbm(shape: Tuple[int, int, int], cell_size_m: Tuple[float, float, float],
+                blob_m: float, seed: int, octaves: int = 3) -> np.ndarray:
+    """Three octaves of inverted Worley noise, blobs about ``blob_m`` across at the first.
+
+    Weights 0.625 / 0.25 / 0.125, as in Schneider's Perlin-Worley recipe: big round lobes with
+    smaller lobes on them, which is the cauliflower.
+    """
+    extent = [n * c for n, c in zip(shape, cell_size_m)]
+    out = np.zeros(shape, dtype=np.float32)
+    weights = (0.625, 0.25, 0.125, 0.0625)[:octaves]
+    total = sum(weights)
+    for octave, weight in enumerate(weights):
+        size = blob_m / (2 ** octave)
+        # Whole lattice cells across each periodic axis; at least one, and never finer than two
+        # grid cells, below which the blobs alias into noise.
+        lattice = tuple(max(1, min(int(round(e / size)), n // 2)) for e, n in zip(extent, shape))
+        out += weight * _periodic_worley(shape, lattice, seed + 31 * octave)
+    return out / total
+
+
+def _upsample2_periodic(a: np.ndarray) -> np.ndarray:
+    """Double every axis of a periodic grid with linear interpolation between cell centres."""
+    for axis in range(a.ndim):
+        prev = np.roll(a, 1, axis=axis)
+        nxt = np.roll(a, -1, axis=axis)
+        even = 0.75 * a + 0.25 * prev
+        odd = 0.75 * a + 0.25 * nxt
+        stacked = np.stack([even, odd], axis=axis + 1)
+        shape = list(a.shape)
+        shape[axis] *= 2
+        a = stacked.reshape(shape)
+    return a
+
+
+def _billow_field(shape: Tuple[int, int, int], cell_size_m: Tuple[float, float, float],
+                  blob_m: float, seed: int) -> np.ndarray:
+    """The Worley term for the field's shape, computed at half resolution and interpolated up.
+
+    The lobes are several cells across and smooth, so half resolution loses nothing visible and
+    costs an eighth: the full-resolution version took five seconds per octave at the default grid.
+    Two octaves; the fine detail texture carries the small billows.
+    """
+    if all(n % 2 == 0 and n >= 8 for n in shape):
+        coarse = tuple(n // 2 for n in shape)
+        cells = tuple(2.0 * c for c in cell_size_m)
+        return _upsample2_periodic(_worley_fbm(coarse, cells, blob_m, seed, octaves=2))
+    return _worley_fbm(shape, cell_size_m, blob_m, seed, octaves=2)
+
+
+def _perlin_worley(noise: np.ndarray, worley: np.ndarray, amount: float) -> np.ndarray:
+    """Schneider's remap: dilate the fractal noise where the Worley noise is high.
+
+    ``remap(noise, amount * (worley - 1), 1, 0, 1)``. Where a Worley blob sits, the lower bound
+    drops and the noise is pushed up, so the level set bulges out into a round lobe; between blobs
+    it is left alone. ``amount`` 0 is the identity.
+    """
+    low = amount * (worley.astype(np.float64) - 1.0)
+    return (noise - low) / (1.0 - low)
+
+
+def _rank_normalise(values: np.ndarray) -> np.ndarray:
+    """Replace every value by its rank, scaled to 0..1: a uniform distribution, same order."""
+    flat = values.reshape(-1)
+    ranks = np.empty(flat.size, dtype=np.float64)
+    ranks[np.argsort(flat, kind="stable")] = np.arange(flat.size, dtype=np.float64)
+    return (ranks / max(flat.size - 1, 1)).reshape(values.shape)
+
+
+def _linear_weights(position: np.ndarray, n: int) -> np.ndarray:
+    """Periodic linear-interpolation weights: row k reads ``position[k]`` (in cells) from n cells."""
+    i0 = np.floor(position).astype(np.int64)
+    t = position - i0
+    weights = np.zeros((position.size, n))
+    rows = np.arange(position.size)
+    np.add.at(weights, (rows, i0 % n), 1.0 - t)
+    np.add.at(weights, (rows, (i0 + 1) % n), t)
+    return weights
+
+
+def _column_is_cloudy(density: np.ndarray) -> np.ndarray:
+    """Which columns of a (level, z, x) density grid an observer below would call cloudy.
+
+    A column counts when it holds at least one full level's worth of density, summed through its
+    height: at the shipped extinction that is an optical depth of about two, a cloud you cannot
+    see the sky through. The earlier rule -- some level above one half -- ignored columns made of
+    many partly-dense cells, which are just as opaque, and a requested 30 % cover rendered as 45 %.
+    """
+    return density.sum(axis=0) >= 1.0
 
 
 def _profile_area(profile: CloudProfile, u: np.ndarray) -> np.ndarray:
@@ -395,6 +556,12 @@ MS_ECCENTRICITY = 0.5
 #: zero: the shadowed side of a cumulus is grey, not black, because it is still lit by light that
 #: reached it the long way through the cloud and by the sky and ground around it.
 MS_SHADOW_FLOOR = 0.45
+#: How bright a thick cloud is from below, as a share of its lit-side (reflection) envelope.
+#: Physically a thick base transmits less than it reflects, but the base is also lit by the sky
+#: and the ground, which this model does not carry, and the dome's incident meter is calibrated on
+#: it: at 0.6 the meter opened up at sunset and the clear gaps burned out (sunset highlights 1.5x
+#: noon's). So it stays at 1 and the from-below fix only ever *raises* a thin edge.
+BASE_ENVELOPE = 1.0
 #: How far a ray that runs level *inside* the slab is followed before it is called done. A ray
 #: exactly parallel to the base never leaves through either plane, so it needs a length of its
 #: own rather than an infinity that would make the step size meaningless.
@@ -406,7 +573,7 @@ _MARCH_GROWTH = 3.0
 
 
 #: Default strength of the fine detail, in threshold units (see :attr:`CloudField.detail_strength`).
-DETAIL_STRENGTH = 0.08
+DETAIL_STRENGTH = 0.04
 #: Cells per side of the fine detail texture, and how much finer its cell is than the field's.
 _DETAIL_CELLS = 64
 _DETAIL_REFINE = 4
@@ -462,6 +629,8 @@ class CloudField:
     feature_m: float = 400.0
     erosion_scale: float = 1.0
     beta_scale: float = 1.0
+    #: Scales the genus' :attr:`CloudProfile.billow`. 0 turns the Worley lobes off.
+    billow_scale: float = 1.0
     #: Amplitude of the fine detail, in threshold units. The field's own grid is 60 m, so on its
     #: own every edge is a 60 m ramp and every cloud a soft blob. A second, four-times-finer
     #: periodic noise is added to the field's signed distance from its threshold *at sample
@@ -517,6 +686,7 @@ class CloudField:
         beta = self.profile.beta * self.beta_scale
         erosion = self.profile.erosion * self.erosion_scale
 
+        spacing_m = self.profile.spacing * self.feature_m
         noise = _periodic_fractal_noise(
             shape,
             beta,
@@ -524,7 +694,38 @@ class CloudField:
             cell_size_m=cell_size_m,
             min_wavelength_m=self.feature_m,
             anisotropy=self.profile.anisotropy,
+            max_wavelength_m=spacing_m,
         )
+        columnar = min(max(self.profile.columnar, 0.0), 1.0)
+        if columnar > 0.0:
+            # The coverage map: a 2D field of blobs about two features across, broadcast up the
+            # column. Built as a one-level slab of the same noise so it tiles with the field.
+            column = _periodic_fractal_noise(
+                (1, self.cells, self.cells),
+                beta,
+                self.seed + 1543,
+                cell_size_m=(vertical_m, self.cell_m, self.cell_m),
+                min_wavelength_m=2.0 * self.feature_m,
+                anisotropy=self.profile.anisotropy,
+                max_wavelength_m=spacing_m,
+            )
+            cellular = min(max(self.profile.billow, 0.0), 1.0)
+            if cellular > 0.0:
+                # A convective field is a set of separate thermals, each its own cloud: a cellular
+                # noise gives every cloud a centre to grow round, spaced about spacing_m apart.
+                lattice = max(1, int(round(self.cells * self.cell_m / spacing_m)))
+                cells = _periodic_worley((1, self.cells, self.cells), (1, lattice, lattice),
+                                         self.seed + 2711)
+                # The fractal decides how big each cell's cloud grows, and leaves some empty:
+                # equal clouds on a lattice would read as a pattern, not as weather.
+                modulated = _rank_normalise(cells * (0.35 + column))
+                column = cellular * modulated + (1.0 - cellular) * column
+            noise = columnar * column + (1.0 - columnar) * noise
+        billow = min(max(self.profile.billow * self.billow_scale, 0.0), 1.0)
+        if billow > 0.0:
+            # Lobes about one and a half features across: a turret, with smaller turrets on it.
+            worley = _billow_field(shape, cell_size_m, 1.5 * self.feature_m, self.seed + 3571)
+            noise = _perlin_worley(noise, worley, billow)
         detail = _periodic_fractal_noise(
             shape,
             max(beta - 1.2, 1.0),
@@ -536,25 +737,56 @@ class CloudField:
         # Erosion bites where the field is already near its own edge and leaves the core alone:
         # `noise * (1 - noise)` peaks at the midpoint and vanishes at both extremes.
         eroded = noise - erosion * (detail - 0.5) * 4.0 * noise * (1.0 - noise)
-        self._eroded = eroded
+
+        # The fine detail, read at the cell centres. It is not zero-sum on the cloud: near a
+        # convex edge there is more outside than inside, so adding it dilates the cloud -- by a
+        # third of the requested cover, measured. So the cover solve, the thresholds and the
+        # extinction calibration all run on the field *with* the detail, and the thresholds come
+        # out where they have to be for the cloud density() returns to have the cover asked for.
+        self._build_detail(vertical_m, beta)
+        jitter = self._detail_at_centres()
+        solved = eroded if jitter is None else eroded + jitter
+        self._eroded = solved
 
         u = (np.arange(self.levels, dtype=np.float64) + 0.5) / self.levels
         relative_area = _profile_area(self.profile, u)
 
         # Sorting each level once turns every later quantile lookup into an index, which is what
         # makes the coverage solve below affordable at 48 bisection steps.
-        per_level = np.sort(eroded.reshape(self.levels, -1), axis=1)
+        per_level = np.sort(solved.reshape(self.levels, -1), axis=1)
         self._area_scale = self._solve_area_scale(per_level, relative_area)
         self._thresholds = self._level_thresholds(per_level, relative_area, self._area_scale)
 
-        signed = eroded - self._thresholds[:, None, None]
+        softness = 2.0 * max(self.softness, 1e-6)
+        # _density holds what density() returns at each cell centre, detail included, so the
+        # calibration, the cover and the plain grid all describe the same cloud.
         self._density = np.clip(
-            0.5 + signed / (2.0 * max(self.softness, 1e-6)), 0.0, 1.0
+            0.5 + (solved - self._thresholds[:, None, None]) / softness, 0.0, 1.0
         ).astype(np.float32)
-        # An empty level carries a threshold above its maximum; clamp so interpolation between
-        # it and a cloudy level stays a sensible boundary rather than a cliff of -inf.
-        self._signed = np.maximum(signed, -1.0).astype(np.float32)
-        self._build_detail(vertical_m, beta)
+        # The detail-free signed field, which density() interpolates before adding the detail
+        # at the sample's own position. An empty level carries a threshold above its maximum;
+        # clamp so interpolation toward it stays a boundary rather than a cliff of -inf.
+        self._signed = np.maximum(eroded - self._thresholds[:, None, None], -1.0).astype(np.float32)
+
+    def _detail_at_centres(self):
+        """``detail_strength * (2 d - 1)`` at every cell centre, or None without detail."""
+        if self._detail is None:
+            return None
+        half = self.half_extent_m
+        dv = self.thickness_m / self.levels
+        heights = self.base_m + (np.arange(self.levels) + 0.5) * dv
+        axis = -half + (np.arange(self.cells) + 0.5) * self.cell_m
+        # The centres are a regular grid, so the trilinear read separates into one linear
+        # interpolation per axis: three small matrix products instead of 3 million gathers --
+        # the same numbers as _sample_detail, forty times faster.
+        n = self._detail.shape[0]
+        detail_v, detail_h = self._detail_cell_m
+        wy = _linear_weights((heights - self.base_m) / detail_v - 0.5, n)
+        wh = _linear_weights(axis / detail_h - 0.5, n)
+        d = np.tensordot(self._detail.astype(np.float64), wh, axes=([2], [1]))   # (i, j, x)
+        d = np.tensordot(d, wh, axes=([1], [1]))                                # (i, x, z)
+        d = np.tensordot(wy, d, axes=([1], [0]))                                # (y, x, z)
+        return self.detail_strength * (2.0 * np.transpose(d, (0, 2, 1)) - 1.0)
 
     def _build_detail(self, vertical_m: float, beta: float) -> None:
         """The fine detail texture: small, periodic, and with a period that divides the tile.
@@ -570,14 +802,24 @@ class CloudField:
         horizontal = tile / repeats / _DETAIL_CELLS
         vertical = vertical_m / 2.0
         self._detail_cell_m = (vertical, horizontal)
-        self._detail = _periodic_fractal_noise(
-            (_DETAIL_CELLS, _DETAIL_CELLS, _DETAIL_CELLS),
+        detail_shape = (_DETAIL_CELLS, _DETAIL_CELLS, _DETAIL_CELLS)
+        detail = _periodic_fractal_noise(
+            detail_shape,
             max(beta - 0.6, 1.4),
             self.seed + 104729,
             cell_size_m=(vertical, horizontal, horizontal),
             min_wavelength_m=4.0 * horizontal,
             anisotropy=self.profile.anisotropy,
-        ).astype(np.float32)
+        )
+        billow = min(max(self.profile.billow * self.billow_scale, 0.0), 1.0)
+        if billow > 0.0:
+            # Small billows on the edge rather than fuzz: the same Perlin-Worley remap, at the
+            # detail's own scale, then back to a uniform 0..1 so the strength keeps its meaning.
+            worley = _worley_fbm(detail_shape, (vertical, horizontal, horizontal),
+                                 16.0 * horizontal, self.seed + 7907)
+            detail = _perlin_worley(detail, worley, billow)
+            detail = _rank_normalise(detail)
+        self._detail = detail.astype(np.float32)
 
     @staticmethod
     def _level_thresholds(
@@ -605,19 +847,21 @@ class CloudField:
         """
         eroded_shape = (self.levels, self.cells, self.cells)
 
+        # Measured on every other column each way: a quarter of the work, and the cover of a
+        # field with 400 m features does not change at that sampling.
+        eroded = self._eroded[:, ::2, ::2]
+        softness = 2.0 * max(self.softness, 1e-6)
+
         def covered(scale: float) -> float:
             thresholds = self._level_thresholds(per_level, relative_area, scale)
-            # Reconstruct occupancy from the sorted array's own statistics rather than the field:
-            # a column is covered when any level exceeds its threshold, which needs the field, so
-            # this uses the cached one built by the caller.
-            occupied = self._eroded > thresholds[:, None, None]
-            return float(np.mean(occupied.any(axis=0)))
+            density = np.clip(0.5 + (eroded - thresholds[:, None, None]) / softness, 0.0, 1.0)
+            return float(np.mean(_column_is_cloudy(density)))
 
         assert self._eroded.shape == eroded_shape
         lo, hi = 0.0, 1.0
         if covered(hi) < self.cover:
             return hi
-        for _ in range(40):
+        for _ in range(24):
             mid = 0.5 * (lo + hi)
             if covered(mid) < self.cover:
                 lo = mid
@@ -660,7 +904,7 @@ class CloudField:
         """The sky fraction the built field actually covers. Should equal ``cover``."""
         if self._density.size == 0:
             return 0.0
-        return float(np.mean(self._density.max(axis=0) > 0.5))
+        return float(np.mean(_column_is_cloudy(self._density)))
 
     def density(self, x_m: Any, y_m: Any, z_m: Any) -> np.ndarray:
         """Normalised cloud density in 0..1 at a world position, trilinearly interpolated.
@@ -1076,6 +1320,20 @@ class CloudField:
             intercepted = 1.0 - transmittance
             mu_sun = max(abs(float(sun[1])), 0.05)
             g = CLOUD_ASYMMETRY_G
+            # Which face of the layer the ray sees. Looking up at a cloud the sun lights from
+            # above, what reaches the eye is the light the layer lets *through*: its diffuse
+            # transmission, 1 - R - exp(-tau / mu0). Looking down on it (or up at a cloud lit
+            # from below the horizon) it is the reflection R. Using R for both was the dark rim
+            # on every thin edge seen from the ground: a thin layer reflects almost nothing but
+            # forward-scatters a great deal, so it should glow brighter than the sky behind it.
+            # tau is the ray's own optical depth brought to the vertical, which for a ray
+            # through the whole slab is the layer's optical thickness.
+            layer_tau = optical * np.maximum(np.abs(dy), 0.02)
+            reflected = ((1.0 - g) * layer_tau) / (2.0 * mu_sun + (1.0 - g) * layer_tau)
+            transmitted = np.clip(1.0 - reflected - np.exp(-layer_tau / mu_sun), 0.0, 1.0)
+            from_below = (dy > 0.0) == (float(sun[1]) > 0.0)
+            layer = np.where(from_below, transmitted, reflected)
+            # The old envelope, kept for the rays it was right for (seen from the lit side).
             albedo = ((1.0 - g) * optical) / (2.0 * mu_sun + (1.0 - g) * optical)
             # The march's mean scattered value along this ray, against what the same ray would
             # have got with nothing shadowing it. The reference is per-ray because it carries the
@@ -1088,11 +1346,16 @@ class CloudField:
                 intercepted > 1e-6, radiance / np.maximum(intercepted, 1e-6), 0.0
             )
             modulation = np.clip(shading / np.maximum(fully_lit, 1e-9), 0.0, 1.0)
-            radiance = (
-                intercepted
-                * albedo
-                * (MS_SHADOW_FLOOR + (1.0 - MS_SHADOW_FLOOR) * modulation)
-            )
+            # From below, a cloud is at least as bright as the light it transmits. For a thin
+            # layer that is several times the reflection-based envelope, and it is not multiplied
+            # by the intercepted fraction again (a thin edge would vanish as tau squared). A thick
+            # one keeps the envelope, which also stands in for the skylight and ground light a
+            # base receives and the transmission alone leaves out: its bases stay grey, not black,
+            # and the dome's exposure, calibrated on them, keeps its meaning.
+            envelope = np.where(from_below,
+                                np.maximum(layer, BASE_ENVELOPE * intercepted * albedo),
+                                intercepted * albedo)
+            radiance = envelope * (MS_SHADOW_FLOOR + (1.0 - MS_SHADOW_FLOOR) * modulation)
 
         emission_height = np.where(
             height_weight > 1e-12,
@@ -1130,7 +1393,7 @@ class VolumeGrid:
 CLOUD_SHAPE_KEYS = (
     "enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "thickness_m",
     "optical_depth", "feature_m", "erosion_scale", "beta_scale", "cells", "levels", "cell_m",
-    "seed", "detail_strength",
+    "seed", "detail_strength", "billow_scale",
 )
 
 _FIELD_CACHE: Dict[Tuple[Any, ...], "CloudField"] = {}
@@ -1169,6 +1432,7 @@ def cloud_field_from_state(state: Any, build: bool = True):
         erosion_scale=float(clouds.erosion_scale),
         beta_scale=float(clouds.beta_scale),
         detail_strength=float(getattr(clouds, "detail_strength", DETAIL_STRENGTH)),
+        billow_scale=float(getattr(clouds, "billow_scale", 1.0)),
     )
     while len(_FIELD_CACHE) >= 2:
         _FIELD_CACHE.pop(next(iter(_FIELD_CACHE)))

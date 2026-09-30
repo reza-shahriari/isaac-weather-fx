@@ -199,6 +199,19 @@ class WeatherController:
             return drift.copy()
         return stage_to_field(drift, self._manager.context.up_axis())
 
+    def hero_clouds(self):
+        """The hero clouds as the path tracer draws them, or None.
+
+        A :class:`weather_fx.core.hero.HeroClouds`: sample it with ``density(x, y, z, drift_m,
+        anchor_m)`` in the field frame, passing ``cloud_drift_m("field")`` and the anchor in the
+        field frame, so a sensor model sees the same clouds the renderer does.
+        """
+        backend = self._manager.get_backend("viewport")
+        for effect in getattr(backend, "effects", []) if backend is not None else []:
+            if getattr(effect, "name", "") == "hero_clouds":
+                return effect.hero_clouds()
+        return None
+
     @property
     def elapsed_s(self) -> float:
         """Weather time in seconds: wall (or stepped) time scaled by ``general.time_scale``."""

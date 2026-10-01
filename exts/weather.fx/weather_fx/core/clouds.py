@@ -880,6 +880,23 @@ class CloudField:
         return 0.5 * self.cells * self.cell_m
 
     @property
+    def finest_pitch_m(self) -> float:
+        """The finest spacing the field carries, metres: the smallest of a cell, a level and,
+        with the edge detail on, the detail texture's own cell.
+
+        A march has to sample at this spacing (twice per pitch, for a trilinear field) to see
+        every feature the field holds. One sized by :attr:`cell_m` steps over the edge detail --
+        the 15 m structure that is most of what makes a boundary look like cloud -- and on an
+        oblique infrared ray that alone is a quarter kelvin of error. Public because the
+        thermal-camera repo sizes its march by it; :attr:`HeroClouds.finest_pitch_m` answers the
+        same question for the volume-asset source, so a march need not know which it is given.
+        """
+        pitch = min(self.cell_m, self.thickness_m / self.levels)
+        if self._detail is not None:
+            pitch = min(pitch, *self._detail_cell_m)
+        return float(pitch)
+
+    @property
     def extinction_per_m(self) -> float:
         """Visible extinction at unit density, per metre.
 

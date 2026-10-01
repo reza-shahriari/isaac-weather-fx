@@ -332,3 +332,43 @@ def test_a_field_refuses_impossible_inputs_rather_than_clamping_them() -> None:
         field(base_m=-10.0)
     with pytest.raises(ValueError, match="at least"):
         field(cells=4)
+
+
+# --- the finest pitch a march has to resolve ----------------------------------------------------
+
+
+def test_the_finest_pitch_is_the_edge_detail_s_cell_when_the_detail_is_on() -> None:
+    with_detail = field()
+    plain = field(detail_strength=0.0)
+    grid = min(plain.cell_m, plain.thickness_m / plain.levels)
+    assert plain.finest_pitch_m == pytest.approx(grid)
+    assert with_detail.finest_pitch_m == pytest.approx(min(with_detail._detail_cell_m))
+    assert with_detail.finest_pitch_m < 0.6 * grid
+
+
+def _oblique_transmittance(f: CloudField, pitch_m: float) -> np.ndarray:
+    """Midpoint-rule transmittance through the slab on fixed oblique rays, two samples per pitch."""
+    rng = np.random.default_rng(3)
+    n = 200
+    el = np.radians(rng.uniform(15.0, 40.0, n))
+    az = rng.uniform(0.0, 2.0 * np.pi, n)
+    d = np.stack([np.cos(el) * np.sin(az), np.sin(el), -np.cos(el) * np.cos(az)], axis=-1)
+    ox, oz = rng.uniform(-3000.0, 3000.0, n), rng.uniform(-3000.0, 3000.0, n)
+    t0, length = f.base_m / d[:, 1], f.thickness_m / d[:, 1]
+    m = math.ceil(float(length.max()) / (0.5 * pitch_m))
+    t = t0[:, None] + (np.arange(m) + 0.5)[None, :] / m * length[:, None]
+    rho = f.density(ox[:, None] + t * d[:, :1], t * d[:, 1:2], oz[:, None] + t * d[:, 2:3])
+    return np.exp(-rho.sum(axis=1) * length / m * f.extinction_per_m)
+
+
+def test_a_march_at_the_finest_pitch_resolves_the_edge_and_one_at_the_grid_s_does_not() -> None:
+    """The property earns its place only if it is the spacing a march actually needs. Against a
+    2 m reference, two samples per finest pitch hold the transmittance of oblique rays to a few
+    thousandths; two per grid pitch -- what a consumer sizing by ``cell_m`` and the level would
+    do -- miss by several times that, all of it at the edges the detail exists to shape."""
+    f = field()
+    reference = _oblique_transmittance(f, 2.0)
+    fine = np.abs(_oblique_transmittance(f, f.finest_pitch_m) - reference)
+    coarse = np.abs(_oblique_transmittance(f, min(f.cell_m, f.thickness_m / f.levels)) - reference)
+    assert float(np.percentile(fine, 99)) < 0.005
+    assert float(np.percentile(coarse, 99)) > 3.0 * float(np.percentile(fine, 99))

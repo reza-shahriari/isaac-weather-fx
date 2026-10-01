@@ -140,6 +140,15 @@ class HeroClouds:
     def count(self) -> int:
         return int(self.positions_m.shape[0])
 
+    @property
+    def finest_pitch_m(self) -> float:
+        """The finest spacing these clouds carry, metres: one voxel of the asset.
+
+        The same question :attr:`CloudField.finest_pitch_m` answers for the procedural field, so
+        a march that sizes its steps by it works on either source.
+        """
+        return float(self.asset.voxel_m)
+
     def centres_m(self, drift_m: Any = (0.0, 0.0, 0.0), anchor_m: Any = (0.0, 0.0, 0.0)) -> np.ndarray:
         """``(count, 3)`` centre of each cloud's base in the field frame, after the drift.
 

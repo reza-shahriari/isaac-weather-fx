@@ -86,3 +86,10 @@ def test_optical_depth_through_a_cloud_is_positive_and_zero_beside_it():
     beside = clouds.optical_depth_toward((c[0] + 5000.0, 0.0, c[2]), (0.0, 1.0, 0.0),
                                          anchor_m=(0, 0, 0))
     assert through > 5.0 and beside == 0.0
+
+
+def test_the_finest_pitch_is_one_voxel_of_the_asset():
+    """The same question the procedural field answers, so one march sizes its steps on either."""
+    clouds = _clouds(1)
+    assert clouds.finest_pitch_m == pytest.approx(clouds.asset.voxel_m)
+    assert clouds.finest_pitch_m == pytest.approx(2000.0 / 40)

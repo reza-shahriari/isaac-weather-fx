@@ -6,9 +6,9 @@ function :mod:`weather_fx.core.cloudscape` defines, from the same three textures
 cloud, the step scatters:
 
 * **sunlight**, scattered once (the phase function times the beam that reached the point) and
-  many times (the delta-Eddington two-stream field along the sun's chord through the point, as
-  the dome's march since ADR 0180: ``R (1 - f)`` of the beam at a lit face, ``T f`` at a dark one),
-  the optical depth toward the sun and away from it each read along six growing steps;
+  many times (octaves of that term, each dimmer, less shadowed and less directional: Wrenninge
+  et al. 2013, Hillaire 2016), the optical depth toward the sun read on eight jittered samples
+  spaced as the square of their index;
 * **sky light and ground light**, the clear sky's hemisphere means from above and from below,
   mixed by the two-stream diffuse transmittance of the cloud above and below the point (the
   weights sum to one, so a white cloud under a uniform sky vanishes: the furnace).
@@ -232,66 +232,77 @@ def phase(cos_theta: float, g: float) -> float:
     return (1.0 - BACK_LOBE) * henyey_greenstein(cos_theta, g) + BACK_LOBE * henyey_greenstein(cos_theta, -0.3 * g)
 
 
+#: Samples toward the sun and the reach they cover, metres. They are spaced as the square of
+#: their index, so the first is a few metres from the point (a lobe shading its own flank) and
+#: the last hundreds (the cloud behind shading the base).
+SUN_SAMPLES = 8
+SUN_REACH_M = 2400.0
+#: Samples straight up and down for the sky's and the ground's light.
+COLUMN_SAMPLES = 3
+#: Multiple scattering as octaves (Wrenninge, Kulla and Lundqvist 2013; Hillaire 2016): octave k
+#: carries ``MS_ENERGY**k`` of the light, sees ``MS_SHADOW**k`` of the optical depth toward the
+#: sun, and its phase function is ``MS_PHASE**k`` of the way from isotropic to the droplets'.
+#: With five octaves a thick cloud's sunlit face returns about half of a white ground's radiance.
+MS_OCTAVES = 5
+MS_ENERGY = 0.7
+MS_SHADOW = 0.45
+MS_PHASE = 0.5
+
+
 @wp.func
 def sun_optical_depth(
-    p: wp.vec3, sun: wp.vec3, L: Layer,
+    p: wp.vec3, sun: wp.vec3, jitter: float, L: Layer,
     weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D,
 ) -> float:
-    """Optical depth toward the sun over eight steps that double in length (8 m to 1 km), so a
-    lobe's own bumps shade its flank and the cloud behind shades its base."""
+    """Optical depth toward the sun: each sample stands for one segment of the reach and sits at
+    ``jitter`` of the way along it, so a boundary crossing a segment is noise, not a contour."""
     tau = float(0.0)
-    t = float(0.0)
-    step = float(8.0)
-    for _ in range(8):
-        q = p + sun * (t + 0.5 * step)
-        tau += cloud_density(q[0], altitude_of(q), q[2], L, weather, shape, detail) * step
-        t += step
-        step *= 2.0
+    previous = float(0.0)
+    for k in range(SUN_SAMPLES):
+        f = float(k + 1) / float(SUN_SAMPLES)
+        current = f * f
+        width = (current - previous) * SUN_REACH_M
+        q = p + sun * ((previous + (current - previous) * jitter) * SUN_REACH_M)
+        tau += cloud_density(q[0], altitude_of(q), q[2], L, weather, shape, detail) * width
+        previous = current
     return tau * L.extinction_per_m
 
 
 @wp.func
 def column_optical_depth(
-    p: wp.vec3, alt: float, span_m: float, L: Layer,
+    p: wp.vec3, alt: float, span_m: float, jitter: float, L: Layer,
     weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D,
 ) -> float:
-    """Optical depth straight up (``span_m`` > 0) or down from ``p`` to the layer's edge, from
-    three samples at the sixth, the half and the five sixths of the span."""
+    """Optical depth straight up (``span_m`` > 0) or down from ``p`` to the layer's edge, on
+    segments spaced as the square of their index and sampled at ``jitter`` along each."""
     tau = float(0.0)
-    for k in range(3):
-        f = (float(k) + 0.5) / 3.0
-        tau += cloud_density(p[0], alt + f * span_m, p[2], L, weather, shape, detail)
-    return tau * wp.abs(span_m) / 3.0 * L.extinction_per_m
+    previous = float(0.0)
+    for k in range(COLUMN_SAMPLES):
+        f = float(k + 1) / float(COLUMN_SAMPLES)
+        current = f * f
+        tau += cloud_density(p[0], alt + (previous + (current - previous) * jitter) * span_m, p[2],
+                             L, weather, shape, detail) * (current - previous)
+        previous = current
+    return tau * wp.abs(span_m) * L.extinction_per_m
 
 
 @wp.func
-def two_stream(tau_sun: float, tau_away: float) -> float:
-    """The multiply-scattered sunlight at a point, as a fraction of a white ground's radiance in
-    the same sun: the delta-Eddington two-stream field of the chord through the point, read as
-    the back stream ``R (1 - f)`` plus the forward stream ``T f`` (docs/physics-model.md section
-    7.5, ADR 0180), with ``f`` the point's depth along the chord."""
-    tau_c = tau_sun + tau_away
-    if tau_c <= 1.0e-6:
-        return 0.0
-    tau_s = (1.0 - CLOUD_G) * tau_c
-    r = tau_s / (2.0 + tau_s)
-    t = 2.0 / (2.0 + tau_s) - wp.exp(-tau_c)
-    f = tau_sun / tau_c
-    return wp.max(r * (1.0 - f) + t * f, 0.0)
-
-
-@wp.func
-def depth_falloff(tau_sun: float) -> float:
-    """How the multiply-scattered light falls off with optical depth from the lit surface: the
-    mean of Wrenninge's attenuation octaves (``exp(-b^i tau)``, b = 1/2, six octaves), 1 at the
-    surface and about 0.4 six optical depths in. The two-stream field gives the slab's mean; this
-    is what makes a bump's shadowed flank darker than its lit crown."""
+def sunlight(cos_sun: float, tau_sun: float) -> float:
+    """Sunlight scattered toward the camera per unit of the beam's illuminance: the droplets'
+    phase function on the attenuated beam, plus the octaves that stand for light scattered many
+    times, each dimmer, less shadowed and less directional than the one before."""
+    direct = phase(cos_sun, CLOUD_G)
+    isotropic = 1.0 / (4.0 * 3.14159265)
     total = float(0.0)
-    b = float(1.0)
-    for _ in range(6):
-        total += wp.exp(-b * tau_sun)
-        b *= 0.5
-    return total / 6.0
+    energy = float(1.0)
+    shadow = float(1.0)
+    shape_k = float(1.0)
+    for _ in range(MS_OCTAVES):
+        total += energy * (isotropic + (direct - isotropic) * shape_k) * wp.exp(-shadow * tau_sun)
+        energy *= MS_ENERGY
+        shadow *= MS_SHADOW
+        shape_k *= MS_PHASE
+    return total
 
 
 @wp.func
@@ -379,14 +390,13 @@ def march_clouds(
                 clear_m = 0.0
                 sigma = dens * L.extinction_per_m
                 step = wp.min(coarse, wp.max(wp.min(coarse * FINE_STEP, SKIN_STEP / sigma), footprint))
-                tau_sun = sun_optical_depth(p, M.sun_dir, L, weather, shape, detail)
-                tau_away = sun_optical_depth(p, -M.sun_dir, L, weather, shape, detail)
-                sun = (phase(cos_sun, CLOUD_G) * wp.exp(-tau_sun)
-                       + M.sun_mu / 3.14159265 * two_stream(tau_sun, tau_away) * depth_falloff(tau_sun))
+                jitter = hash01(i + 7919 * count, j + 104729)
+                tau_sun = sun_optical_depth(p, M.sun_dir, jitter, L, weather, shape, detail)
+                sun = sunlight(cos_sun, tau_sun)
                 # Sky and ground light through the cloud above and below this point.
                 h = (alt - L.base_m) / L.thickness_m
-                tau_up = column_optical_depth(p, alt, (1.0 - h) * L.thickness_m, L, weather, shape, detail)
-                tau_dn = column_optical_depth(p, alt, -h * L.thickness_m, L, weather, shape, detail)
+                tau_up = column_optical_depth(p, alt, (1.0 - h) * L.thickness_m, jitter, L, weather, shape, detail)
+                tau_dn = column_optical_depth(p, alt, -h * L.thickness_m, jitter, L, weather, shape, detail)
                 # The diffuse field inside a conservative cloud is a mix of what comes in from
                 # above and from below, weighted by how much of each reaches the point; the
                 # weights sum to one, so under a uniform sky the cloud returns exactly the sky.

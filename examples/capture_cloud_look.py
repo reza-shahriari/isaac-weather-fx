@@ -136,7 +136,7 @@ for mode, tag, title, subframes in modes:
             hour = view_hour
             pump(12)
         aim(azimuth, tilt, focal)
-        pump(6)
+        pump(20)    # the layer's running mean over frames settles
         rep.orchestrator.step(rt_subframes=subframes)
         image = np.asarray(rgb.get_data())[..., :3].copy()
         path = os.path.join(args.out, f"{tag}_{name}.png")

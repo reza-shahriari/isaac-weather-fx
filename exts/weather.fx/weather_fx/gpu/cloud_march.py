@@ -143,6 +143,7 @@ class March:
     step_min_m: float
     step_growth: float
     max_steps: int
+    frame: int
 
 
 @wp.func
@@ -362,7 +363,7 @@ def march_clouds(
 
     if t_end > t_start and t_start >= 0.0:
         step = wp.max(M.step_min_m, M.step_growth * t_start)
-        t = t_start + hash01(i, j) * step
+        t = t_start + hash01(i + 15487 * M.frame, j + 32452 * M.frame) * step
         cos_sun = wp.dot(d, M.sun_dir)
         count = int(0)
         # Metres marched since the last sample that held cloud; "far" before the first one.
@@ -390,7 +391,7 @@ def march_clouds(
                 clear_m = 0.0
                 sigma = dens * L.extinction_per_m
                 step = wp.min(coarse, wp.max(wp.min(coarse * FINE_STEP, SKIN_STEP / sigma), footprint))
-                jitter = hash01(i + 7919 * count, j + 104729)
+                jitter = hash01(i + 7919 * count, j + 104729 + 86028 * M.frame)
                 tau_sun = sun_optical_depth(p, M.sun_dir, jitter, L, weather, shape, detail)
                 sun = sunlight(cos_sun, tau_sun)
                 # Sky and ground light through the cloud above and below this point.
@@ -420,6 +421,80 @@ def march_clouds(
         out_dist[j, i] = weighted_t / weight
     else:
         out_dist[j, i] = 0.0
+
+
+@wp.struct
+class History:
+    forward: wp.vec3
+    right: wp.vec3
+    up: wp.vec3
+    focal_px: float
+    #: Smallest weight of the new frame: 1 / the number of frames the mean settles over.
+    floor: float
+
+
+@wp.func
+def texel3(a: wp.array2d(dtype=wp.vec3), x: int, y: int, w: int, h: int) -> wp.vec3:
+    return a[wp.clamp(y, 0, h - 1), wp.clamp(x, 0, w - 1)]
+
+
+@wp.func
+def texel1(a: wp.array2d(dtype=float), x: int, y: int, w: int, h: int) -> float:
+    return a[wp.clamp(y, 0, h - 1), wp.clamp(x, 0, w - 1)]
+
+
+@wp.kernel
+def accumulate(
+    M: March, H: History,
+    rgb: wp.array2d(dtype=wp.vec3), trans: wp.array2d(dtype=float), dist: wp.array2d(dtype=float),
+    old_rgb: wp.array2d(dtype=wp.vec3), old_t: wp.array2d(dtype=float),
+    old_dist: wp.array2d(dtype=float), old_n: wp.array2d(dtype=float),
+    new_rgb: wp.array2d(dtype=wp.vec3), new_t: wp.array2d(dtype=float),
+    new_dist: wp.array2d(dtype=float), new_n: wp.array2d(dtype=float),
+):
+    """The running mean of the march over frames. Each frame's jitter is different, so the mean
+    converges on the integral the jitter samples. The history is looked up by the pixel's ray
+    direction in the previous camera (exact when the camera turns, and close when it moves,
+    since the cloud is far); a pixel with no history starts again from this frame."""
+    j, i = wp.tid()
+    px = (float(i) + 0.5 - 0.5 * float(M.width)) / M.focal_px
+    py = (0.5 * float(M.height) - float(j) - 0.5) / M.focal_px
+    d = wp.normalize(M.forward + M.right * px + M.up * py)
+    n = float(0.0)
+    hist_rgb = wp.vec3(0.0, 0.0, 0.0)
+    hist_t = float(1.0)
+    hist_d = float(0.0)
+    z = wp.dot(d, H.forward)
+    if z > 1.0e-3:
+        x = wp.dot(d, H.right) / z * H.focal_px + 0.5 * float(M.width) - 0.5
+        y = 0.5 * float(M.height) - wp.dot(d, H.up) / z * H.focal_px - 0.5
+        if x >= 0.0 and y >= 0.0 and x <= float(M.width - 1) and y <= float(M.height - 1):
+            x0 = int(wp.floor(x))
+            y0 = int(wp.floor(y))
+            fx = x - float(x0)
+            fy = y - float(y0)
+            w00 = (1.0 - fx) * (1.0 - fy)
+            w10 = fx * (1.0 - fy)
+            w01 = (1.0 - fx) * fy
+            w11 = fx * fy
+            hist_rgb = (texel3(old_rgb, x0, y0, M.width, M.height) * w00 + texel3(old_rgb, x0 + 1, y0, M.width, M.height) * w10
+                        + texel3(old_rgb, x0, y0 + 1, M.width, M.height) * w01 + texel3(old_rgb, x0 + 1, y0 + 1, M.width, M.height) * w11)
+            hist_t = (texel1(old_t, x0, y0, M.width, M.height) * w00 + texel1(old_t, x0 + 1, y0, M.width, M.height) * w10
+                      + texel1(old_t, x0, y0 + 1, M.width, M.height) * w01 + texel1(old_t, x0 + 1, y0 + 1, M.width, M.height) * w11)
+            hist_d = (texel1(old_dist, x0, y0, M.width, M.height) * w00 + texel1(old_dist, x0 + 1, y0, M.width, M.height) * w10
+                      + texel1(old_dist, x0, y0 + 1, M.width, M.height) * w01 + texel1(old_dist, x0 + 1, y0 + 1, M.width, M.height) * w11)
+            n = wp.min(wp.min(texel1(old_n, x0, y0, M.width, M.height), texel1(old_n, x0 + 1, y0, M.width, M.height)),
+                       wp.min(texel1(old_n, x0, y0 + 1, M.width, M.height), texel1(old_n, x0 + 1, y0 + 1, M.width, M.height)))
+    a = wp.max(1.0 / (n + 1.0), H.floor)
+    new_rgb[j, i] = hist_rgb * (1.0 - a) + rgb[j, i] * a
+    new_t[j, i] = hist_t * (1.0 - a) + trans[j, i] * a
+    # A pixel's distance is only meaningful where it holds cloud.
+    dnow = dist[j, i]
+    if hist_d <= 0.0 or dnow <= 0.0:
+        new_dist[j, i] = wp.max(dnow, hist_d)
+    else:
+        new_dist[j, i] = hist_d * (1.0 - a) + dnow * a
+    new_n[j, i] = n + 1.0
 
 
 @wp.struct
@@ -516,6 +591,10 @@ class CloudRenderer:
             setattr(self.layer, key, value)
         self._buffers = None
         self._layer = None
+        self._frame = 0
+        self._history = None      # two sets of (rgb, transmittance, distance, count)
+        self._history_key = None  # what the history was accumulated under
+        self._history_pose = None
 
     def render(
         self, camera: Camera, lighting: Lighting, *, max_distance_m: float = 80_000.0,
@@ -529,14 +608,18 @@ class CloudRenderer:
         self, camera: Camera, lighting: Lighting, tables: SkyTables, *,
         gains: Tuple[float, float, float] = (1.0, 1.0, 1.0), scale: float = 1.0, flip: bool = False,
         density_scale: float = 1.0, max_distance_m: float = 80_000.0, step_min_m: float = 24.0,
-        step_growth: float = 0.012, max_steps: int = 768,
+        step_growth: float = 0.012, max_steps: int = 768, accumulate_frames: int = 16,
     ):
         """The finished layer for one camera, left on the GPU: a ``(height, width)`` ``vec4``
         Warp array of the cloud composed over the clear sky through the air, times ``gains`` and
         ``scale``. The array is reused between calls of one size; hand it to a texture before
         the next call."""
+        self._frame += 1
         rgb, trans, dist, m = self._march(camera, lighting, max_distance_m, step_min_m, step_growth,
-                                          max_steps, density_scale)
+                                          max_steps, density_scale, frame=self._frame)
+        if accumulate_frames > 1:
+            rgb, trans, dist = self._accumulate(camera, lighting, m, rgb, trans, dist,
+                                                density_scale, accumulate_frames)
         k = Compose()
         k.light_azimuth = tables.light_azimuth_rad
         k.air_near_m, k.air_log_span = tables.air_near_m, tables.air_log_span
@@ -552,8 +635,42 @@ class CloudRenderer:
             wp.synchronize_device(self.device)
         return self._layer
 
+    def reset_history(self) -> None:
+        """Forget the accumulated frames (the cloud, the light or the camera jumped)."""
+        self._history_key = None
+
+    def _accumulate(self, camera: Camera, lighting: Lighting, m: Any, rgb: Any, trans: Any, dist: Any,
+                    density_scale: float, frames: int):
+        """Blend this frame into the history and return the accumulated arrays."""
+        shape = (camera.height, camera.width)
+        position = np.asarray(camera.position_m, dtype=np.float64)
+        key = (shape, round(float(camera.hfov_deg), 4), tuple(round(float(v), 4) for v in lighting.sun_direction),
+               tuple(round(float(v), 1) for v in lighting.sun_rgb), round(float(density_scale), 4))
+        fresh = self._history is None or self._history[0][0].shape != shape or key != self._history_key
+        if not fresh and np.linalg.norm(position - self._history_pose[0]) > 200.0:
+            fresh = True    # a jump, not a flight: the old directions no longer show the same cloud
+        with wp.ScopedDevice(self.device):
+            if self._history is None or self._history[0][0].shape != shape:
+                self._history = [(wp.zeros(shape, dtype=wp.vec3), wp.zeros(shape, dtype=float),
+                                  wp.zeros(shape, dtype=float), wp.zeros(shape, dtype=float)) for _ in range(2)]
+            old, new = self._history
+            h = History()
+            if fresh:
+                old[3].zero_()
+                h.forward, h.right, h.up, h.focal_px = m.forward, m.right, m.up, m.focal_px
+            else:
+                _, forward, right, up, focal = self._history_pose
+                h.forward, h.right, h.up, h.focal_px = wp.vec3(*forward), wp.vec3(*right), wp.vec3(*up), focal
+            h.floor = 1.0 / float(frames)
+            wp.launch(accumulate, dim=shape, inputs=[m, h, rgb, trans, dist, *old, *new])
+        self._history = [new, old]
+        forward, right, up = camera.basis()
+        self._history_pose = (position, tuple(forward), tuple(right), tuple(up), float(m.focal_px))
+        self._history_key = key
+        return new[0], new[1], new[2]
+
     def _march(self, camera: Camera, lighting: Lighting, max_distance_m: float, step_min_m: float,
-               step_growth: float, max_steps: int, density_scale: float = 1.0):
+               step_growth: float, max_steps: int, density_scale: float = 1.0, frame: int = 0):
         forward, right, up = camera.basis()
         m = March()
         m.origin = wp.vec3(*[float(v) for v in camera.position_m])
@@ -567,6 +684,7 @@ class CloudRenderer:
         m.below_rgb = wp.vec3(*[float(v) for v in lighting.below_rgb])
         m.max_distance_m = float(max_distance_m)
         m.step_min_m, m.step_growth, m.max_steps = float(step_min_m), float(step_growth), int(max_steps)
+        m.frame = int(frame)
         shape = (camera.height, camera.width)
         layer = self.layer
         if density_scale != 1.0:

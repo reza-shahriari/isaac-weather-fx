@@ -14,6 +14,7 @@ import pytest
 
 from weather_fx.core.clouds import (
     CLOUD_ASYMMETRY_G,
+    VISIBLE_DROPLET_ALBEDO,
     CLOUD_TYPES,
     CloudField,
     cloud_profile,
@@ -235,20 +236,31 @@ def test_the_emission_height_rises_above_the_base_on_an_oblique_ray() -> None:
 def test_a_thick_cloud_is_brighter_than_a_thin_one_which_single_scattering_cannot_do() -> None:
     """A forward march alone saturates: its value is bounded by the mean scattered term, so depth
     60 comes out no brighter than depth 20 although the real albedos are 0.89 and 0.72. The
-    two-stream envelope is what restores that, and this test fails without it."""
-    f = field(cover=0.8, cells=128, levels=32)
+    two-stream diffuse light is what restores that, and this test fails without it.
+
+    Two overcast decks, seen from above, rather than the thin and thick parts of one broken field:
+    in a broken field a thin part beside a thick one is lit through its neighbour, which is real
+    and not what this test is about."""
     sun = np.array([0.0, math.sin(math.radians(50.0)), -math.cos(math.radians(50.0))])
+    mu0 = float(sun[1])
+    g = CLOUD_ASYMMETRY_G
     rng = np.random.default_rng(1)
     dirs = np.stack(
-        [rng.normal(0, 0.25, 4000), np.full(4000, 1.0), rng.normal(0, 0.25, 4000)], axis=-1
+        [rng.normal(0, 0.05, 2000), np.full(2000, -1.0), rng.normal(0, 0.05, 2000)], axis=-1
     )
-    # Albedo is what the lit side reflects, so look at it from the lit side: from above.
-    above = np.array([0.0, f.top_m + 200.0, 0.0])
-    res = f.march(above, dirs * np.array([1.0, -1.0, 1.0]), sun_direction=sun, steps=64)
-    thin = (res.optical_depth > 2.0) & (res.optical_depth < 6.0)
-    thick = res.optical_depth > 40.0
-    assert thin.any() and thick.any()
-    assert res.radiance[thick].mean() > 1.5 * res.radiance[thin].mean()
+    origin = np.stack([rng.uniform(-3000, 3000, 2000), np.zeros(2000),
+                       rng.uniform(-3000, 3000, 2000)], axis=-1)
+    albedo = {}
+    for depth in (4.0, 50.0):
+        deck = field(cover=1.0, profile=cloud_profile("stratus"), optical_depth=depth)
+        origin[:, 1] = deck.top_m + 50.0
+        res = deck.march(origin, dirs, sun_direction=sun, steps=96,
+                         max_path_m=1.2 * deck.thickness_m)
+        albedo[depth] = float(res.radiance.mean())
+    expected = (((1 - g) * 50 / (2 * mu0 + (1 - g) * 50))
+                / ((1 - g) * 4 / (2 * mu0 + (1 - g) * 4)))
+    assert albedo[50.0] / albedo[4.0] == pytest.approx(expected, rel=0.2)
+    assert albedo[50.0] > 1.5 * albedo[4.0]
 
 
 def test_from_below_a_thick_base_is_darker_than_a_thin_cloud() -> None:
@@ -291,8 +303,11 @@ def test_the_lit_side_approaches_the_two_stream_albedo_of_the_layer() -> None:
 
 
 def test_the_shadowed_side_is_darker_but_never_black() -> None:
-    """Self-shadowing is what gives a cloud its shape; a floor is what keeps the shadow grey,
-    because a real cloud's dark side is still lit the long way through and by the sky."""
+    """Self-shadowing is what gives a cloud its shape; what keeps the shadow grey is that a real
+    cloud's dark side is still lit the long way through -- the sun term's floor -- and by the sky
+    and the ground, which the march returns as its own terms covering everything the ray
+    intercepts. (The sun term alone used to carry the sky too, through a reflection envelope on
+    every base; it no longer does, so its floor here is the transmitted light alone.)"""
     f = field(cover=0.85, cells=128, levels=32)
     sun = np.array([0.0, math.sin(math.radians(40.0)), -math.cos(math.radians(40.0))])
     rng = np.random.default_rng(3)
@@ -303,7 +318,12 @@ def test_the_shadowed_side_is_darker_but_never_black() -> None:
     lit = res.optical_depth > 20.0
     assert lit.any()
     values = res.radiance[lit]
-    assert values.min() > 0.08, "shadow must not render black"
+    # The sun's own floor is a base's diffuse transmission: a column 44 deep passes 0.10 of a
+    # 40 degree sun, and a neighbour on the sun's side can shadow it to half that. The sky and
+    # the ground are what keep it grey, and they cover everything the ray intercepts (below).
+    assert values.min() > 0.03, "shadow must not render black"
+    sky = (res.ambient_above + res.ambient_below)[lit]
+    assert np.allclose(sky, VISIBLE_DROPLET_ALBEDO * (1.0 - res.transmittance[lit]), atol=1e-9)
     # `MS_SHADOW_FLOOR` puts a ceiling of 1/0.45 = 2.2 on this ratio by construction, so the bar
     # is set inside it. A flat-shaded cloud -- the failure being guarded against -- scores 1.0.
     assert values.max() > 1.5 * values.min(), "and there must be real shading variation"

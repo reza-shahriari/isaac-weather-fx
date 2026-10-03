@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -533,35 +533,78 @@ class MarchResult:
     #: Single-plus-multiple-scattered radiance, relative to the incident sunlight. ``None``
     #: unless a sun direction was given.
     radiance: np.ndarray | None = None
+    #: Skylight scattered toward the sensor, as weights on the radiance the cloud is bathed in
+    #: from **above** (the sky) and from **below** (the ground and the low sky): the caller's
+    #: ``ambient_above * L_above + ambient_below * L_below`` is the light the cloud adds. Each
+    #: sample contributes ``albedo * T * (1 - exp(-dtau))`` split by its height in the slab, so
+    #: the two sum to ``albedo * (1 - transmittance)`` exactly, and a cloud under a uniform sky
+    #: adds back precisely what it removed: the white furnace (docs/physics-model.md §7.5).
+    ambient_above: np.ndarray | None = None
+    ambient_below: np.ndarray | None = None
 
 
 #: Henyey-Greenstein asymmetry for cloud droplets in the visible. Strongly forward-scattering,
 #: which is why a cloud between you and the sun has a bright rim.
 CLOUD_ASYMMETRY_G = 0.85
-#: Octaves of multiple scattering. A cumulus is brilliant white *because* light bounces inside it
-#: many times, and single scattering cannot produce that: a thick cloud scatters almost all the
-#: light that enters it, but a single-scatter integral attenuates every sample by the direct
-#: sunlight reaching it, which deep inside is nothing. Rendered that way a sunlit cumulus comes
-#: out **darker than the sky behind it**, which is what the first version of this model did.
-#:
-#: Each octave re-integrates with the sun's optical depth scaled by ``a``, its contribution by
-#: ``b`` and the phase function's eccentricity by ``c``, standing in for light that has already
-#: been scattered ``n`` times and so is both less attenuated and less directional. The
-#: contributions are normalised to sum to one, so the model cannot make light.
-MS_OCTAVES = 4
-MS_ATTENUATION = 0.55
-MS_CONTRIBUTION = 0.5
-MS_ECCENTRICITY = 0.5
-#: How bright a fully self-shadowed part of a cloud is, as a fraction of a fully lit one. Not
-#: zero: the shadowed side of a cumulus is grey, not black, because it is still lit by light that
-#: reached it the long way through the cloud and by the sky and ground around it.
+#: How bright a fully self-shadowed part of a cloud is, as a fraction of a fully lit one. No
+#: longer used by the march, whose shadows are the two-stream transmission along each point's
+#: own sun chord (:func:`_diffuse_sunlight`); kept because the dome's lit/shadow colour blend
+#: (``sky._cloud_colour``) maps the march's brightness onto it.
 MS_SHADOW_FLOOR = 0.45
-#: How bright a thick cloud is from below, as a share of its lit-side (reflection) envelope.
-#: Physically a thick base transmits less than it reflects, but the base is also lit by the sky
-#: and the ground, which this model does not carry, and the dome's incident meter is calibrated on
-#: it: at 0.6 the meter opened up at sunset and the clear gaps burned out (sunset highlights 1.5x
-#: noon's). So it stays at 1 and the from-below fix only ever *raises* a thin edge.
-BASE_ENVELOPE = 1.0
+#: Single-scattering albedo of cloud droplets in the visible. Liquid water at 0.55 um has an
+#: imaginary index near 2e-9, so a 10 um droplet absorbs about one part in 10^5 of what it
+#: intercepts; 0.9999 is that rounded toward absorbing. Every step's in-scatter is multiplied
+#: by it. (The path-traced volumes use 0.999 for a different reason: see
+#: ``backends/viewport/clouds_volume.DROPLET_ALBEDO``.)
+VISIBLE_DROPLET_ALBEDO = 0.9999
+#: The smallest sun cosine the shading divides by: a sun 3 degrees up. Below it the plane-parallel
+#: forms run away, and the light is the twilight sky's, which the ambient terms carry.
+MIN_SUN_COSINE = 0.05
+#: Coarsening of the light maps the march reads (:meth:`CloudField.sun_optical_depth`),
+#: horizontally and vertically. Half resolution horizontally costs a quarter; the levels stay
+#: whole because the march reads the depth fraction across a lit face, which a coarse level
+#: smears: a uniform 50-deep layer read 0.785 against its two-stream 0.830 at half vertical
+#: resolution, within 1 % at full. Measured on the production grid: a dome bake of 3.1 s with
+#: both halved, 12.0 s with neither.
+LIGHT_MAP_COARSEN = 2
+LIGHT_MAP_VERTICAL_COARSEN = 1
+
+
+def _diffuse_sunlight(
+    tau_toward: Any, tau_away: Any, g: float = CLOUD_ASYMMETRY_G
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The two streams of multiply-scattered sunlight at a point inside a cloud, in units of the
+    horizontal illuminance over pi: ``(backward, forward)``.
+
+    One-dimensional along the sunlight's own chord through the point, which is what lets a
+    broken field shade itself: ``tau_toward`` is the optical depth from the point to the cloud's
+    edge toward the sun, ``tau_away`` to its edge the other way. Across that chord, of scaled
+    thickness ``tau* = (1 - g)(tau_toward + tau_away)``, the conservative two-stream (Eddington,
+    delta-scaled) layer reflects ``R = tau*/(2 + tau*)`` and diffusely transmits
+    ``T = 2/(2 + tau*) - exp(-tau)``. The stream running back toward the sun carries ``R`` out of
+    the lit face and nothing out of the dark one; the stream running on with the sunlight carries
+    nothing in at the lit face and ``T`` out of the dark one. Both are taken linear in the depth
+    fraction ``f = tau_toward / chord``: ``R (1 - f)`` and ``T f``.
+
+    In chord form these are the plane-parallel ``R = (1-g) tau_v / (2 mu0 + (1-g) tau_v)`` and
+    its transmission exactly, since a plane-parallel chord is ``tau_v / mu0``. The march weights
+    the backward stream where a ray enters through a lit face (the depth fraction rising along
+    it), the forward one where it enters through a dark face, both along a grazing ray, and
+    in-scatters the source ``S = I - dI/dtau`` that implies along the ray, so that a uniform
+    layer returns exactly ``R`` from above and ``T`` from below, at any optical depth
+    (docs/physics-model.md §7.5). A
+    sun-facing flank is lit at the layer's reflectance, a base at its transmission, and a wisp,
+    where both are of order tau, by little but its single scattering.
+    """
+    toward = np.asarray(tau_toward, dtype=np.float64)
+    chord = toward + np.asarray(tau_away, dtype=np.float64)
+    scaled = (1.0 - g) * chord
+    reflected = scaled / (2.0 + scaled)
+    transmitted = np.clip(2.0 / (2.0 + scaled) - np.exp(-chord), 0.0, 1.0)
+    depth = np.where(chord > 1e-12, toward / np.maximum(chord, 1e-12), 0.0)
+    return reflected * (1.0 - depth), transmitted * depth
+
+
 #: How far a ray that runs level *inside* the slab is followed before it is called done. A ray
 #: exactly parallel to the base never leaves through either plane, so it needs a length of its
 #: own rather than an infinity that would make the step size meaningless.
@@ -1117,7 +1160,7 @@ class CloudField:
     def sun_transmittance(
         self, sun_direction: Any, *, steps: int = 24, coarsen: int = 2
     ) -> np.ndarray:
-        """Transmittance from every grid cell **toward the sun**, cached per direction.
+        """Transmittance from every grid cell **toward the sun**: ``exp(-sun_optical_depth)``.
 
         This is the one quantity that turns a cloud from a cut-out into a cloud. Without it every
         cloudy sample is equally bright, the alpha saturates the moment the optical depth passes
@@ -1126,18 +1169,42 @@ class CloudField:
         a kilometre of its own cloud is between it and the sun, and a thin edge glows because
         almost nothing is.
 
-        Computed on a grid coarsened by ``coarsen`` in each axis and sampled back up. The light
-        field varies far more smoothly than the density does -- it is an integral of it -- so a
-        half-resolution light map is visually indistinguishable and eight times cheaper.
+        For sampling *between* cells use :meth:`sun_optical_depth` and exponentiate after: this
+        grid interpolated directly is biased bright wherever a cell's neighbour is clear.
+        """
+        return np.exp(-self.sun_optical_depth(sun_direction, steps=steps, coarsen=coarsen)
+                      ).astype(np.float32)
+
+    def sun_optical_depth(
+        self, sun_direction: Any, *, steps: int = 24, coarsen: int = 2,
+        vertical_coarsen: Optional[int] = None,
+    ) -> np.ndarray:
+        """Visible optical depth from every grid cell to the cloud's edge **toward the sun**,
+        cached per direction. float32, shaped like the density.
+
+        Stored and interpolated as an optical depth, not as a transmittance. The two differ at
+        every cloud boundary: halfway between a cell under 40 of optical depth and a clear one,
+        interpolated transmittance is 0.5 -- an optical depth of 0.7 -- so a cloud's base read
+        as almost unshadowed. Measured on a cumulus field at a 58 degree sun, the interpolated
+        transmittance put the depth above cloud bases at 0.6 of a fine reference integration;
+        interpolated depth agrees with it (docs/physics-model.md §7.5).
+
+        Computed on a grid coarsened by ``coarsen`` horizontally and ``vertical_coarsen``
+        (default: the same) vertically, and sampled back up. The light field varies far more
+        smoothly than the density does -- it is an integral of it -- except across a cloud's lit
+        face, where the depth runs from nothing to several optical depths within one coarse
+        level; the march reads the depth *fraction* there, so it keeps the levels at full
+        resolution (:data:`LIGHT_MAP_VERTICAL_COARSEN`).
         """
         direction = np.asarray(sun_direction, dtype=np.float64)
         direction = direction / max(float(np.linalg.norm(direction)), 1e-12)
-        key = tuple(np.round(direction, 4))
+        cv = int(coarsen if vertical_coarsen is None else vertical_coarsen)
+        key = tuple(np.round(direction, 4)) + (int(steps), int(coarsen), cv)
         cached = self._sun_cache.get(key)
         if cached is not None:
             return cached
 
-        nz = max(self.levels // coarsen, 2)
+        nz = max(self.levels // cv, 2)
         nc = max(self.cells // coarsen, 4)
         heights = self.base_m + (np.arange(nz) + 0.5) / nz * self.thickness_m
         axis = (np.arange(nc) + 0.5) / nc * (self.cells * self.cell_m) - self.half_extent_m
@@ -1151,18 +1218,17 @@ class CloudField:
         for k in range(steps):
             t = (k + 0.5) * step
             optical += self.density(x + direction[0] * t, y + direction[1] * t, z + direction[2] * t)
-        optical *= step * self.extinction_per_m
-        transmittance = np.exp(-optical).astype(np.float32)
+        optical = (optical * step * self.extinction_per_m).astype(np.float32)
 
-        if coarsen > 1:
-            transmittance = np.repeat(
-                np.repeat(np.repeat(transmittance, coarsen, 0), coarsen, 1), coarsen, 2
+        if coarsen > 1 or cv > 1:
+            optical = np.repeat(
+                np.repeat(np.repeat(optical, cv, 0), coarsen, 1), coarsen, 2
             )[: self.levels, : self.cells, : self.cells]
-            if transmittance.shape != self._density.shape:
-                pad = [(0, t - s) for s, t in zip(transmittance.shape, self._density.shape)]
-                transmittance = np.pad(transmittance, pad, mode="edge")
-        self._sun_cache[key] = transmittance
-        return transmittance
+            if optical.shape != self._density.shape:
+                pad = [(0, t - s) for s, t in zip(optical.shape, self._density.shape)]
+                optical = np.pad(optical, pad, mode="edge")
+        self._sun_cache[key] = optical
+        return optical
 
     def slab_span(self, origin_m: Any, direction: Any) -> Tuple[np.ndarray, np.ndarray]:
         """Where a ray enters and leaves the cloud slab, as distances along it.
@@ -1198,7 +1264,7 @@ class CloudField:
         *,
         sun_direction: Any = None,
         steps: int = 64,
-        ambient: float = 0.30,
+        ambient: float = 0.0,
         max_path_m: float = 8000.0,
         jitter_seed: int = 0,
     ) -> MarchResult:
@@ -1214,11 +1280,25 @@ class CloudField:
         from its base, it radiates from wherever the ray stopped being able to see through, and on
         an oblique ray through a broken field that can be most of a kilometre higher.
 
-        ``radiance`` is relative to the incident sunlight: the in-scattered light at each sample,
-        weighted by the transmittance back to the sensor, with the sun's own transmittance into
-        the cloud giving the self-shadowing and ``ambient`` standing in for the sky and the
-        ground. A Henyey-Greenstein phase function at :data:`CLOUD_ASYMMETRY_G` supplies the
-        forward-scattering rim.
+        ``radiance`` is the sunlight the cloud sends toward the sensor, in units of the
+        horizontal illuminance over pi -- the radiance of a white Lambertian ground in the same
+        sun. Each step in-scatters, with the energy-conserving weight ``T (1 - e^-dtau)`` times
+        the droplet albedo, two lights (docs/physics-model.md §7.5):
+
+        * the direct beam scattered once, through a Henyey-Greenstein phase function at
+          :data:`CLOUD_ASYMMETRY_G` and the sample's transmittance toward the sun -- exact for a
+          thin cloud, and the silver lining;
+        * the multiply-scattered light of :func:`_diffuse_sunlight`, the two-stream field along
+          the sunlight's chord through the sample -- the stream leaving whichever face the ray
+          looks into, in-scattered as the source ``S = I - dI/dtau`` it implies along the
+          ray -- which gives a uniform
+          deck its two-stream albedo from
+          above and its transmission from below at any optical depth, a sun-facing flank the
+          layer's reflectance and a base its transmission.
+
+        The sky's and the ground's light are ``ambient_above`` and ``ambient_below``, returned
+        with or without a sun. ``ambient`` adds a constant to the sun's source and is 0; it used
+        to stand in for them.
         """
         origin = np.asarray(origin_m, dtype=np.float64)
         direction = np.asarray(direction, dtype=np.float64)
@@ -1233,6 +1313,8 @@ class CloudField:
         height_weight = np.zeros(shape, dtype=np.float64)
         height_sum = np.zeros(shape, dtype=np.float64)
         radiance = None if sun_direction is None else np.zeros(shape, dtype=np.float64)
+        ambient_above = np.zeros(shape, dtype=np.float64)
+        ambient_below = np.zeros(shape, dtype=np.float64)
 
         hit = far > near
         if not np.any(hit) or self.cover <= 0.0:
@@ -1241,30 +1323,34 @@ class CloudField:
                 transmittance=transmittance,
                 emission_height_m=np.full(shape, self.base_m),
                 radiance=radiance,
+                ambient_above=ambient_above,
+                ambient_below=ambient_below,
             )
 
-        light = None
-        phase = None
+        toward = away = None
         if sun_direction is not None:
             sun = np.asarray(sun_direction, dtype=np.float64)
             sun = sun / max(float(np.linalg.norm(sun)), 1e-12)
-            light = self.sun_transmittance(sun)
+            # The optical depth from every cell to the cloud's edge toward the sun and away from
+            # it: together, the chord the sunlight takes through each point.
+            toward = self.sun_optical_depth(sun, coarsen=LIGHT_MAP_COARSEN,
+                                            vertical_coarsen=LIGHT_MAP_VERTICAL_COARSEN)
+            away = self.sun_optical_depth(-sun, coarsen=LIGHT_MAP_COARSEN,
+                                          vertical_coarsen=LIGHT_MAP_VERTICAL_COARSEN)
+            g = CLOUD_ASYMMETRY_G
             cos_theta = np.sum(direction * sun, axis=-1)
-            # One phase value per octave, at a progressively less directional g. Normalised so an
-            # isotropic phase function is 1: the dome's absolute scale is an exposure choice and
-            # carrying 1/4pi through it helps nobody.
-            octave_weight = []
-            octave_phase = []
-            octave_power = []
-            norm = sum(MS_CONTRIBUTION**n for n in range(MS_OCTAVES))
-            for n in range(MS_OCTAVES):
-                g = CLOUD_ASYMMETRY_G * MS_ECCENTRICITY**n
-                octave_phase.append(
-                    (1.0 - g * g) / np.power(1.0 + g * g - 2.0 * g * cos_theta, 1.5)
-                )
-                octave_weight.append(MS_CONTRIBUTION**n / norm)
-                octave_power.append(MS_ATTENUATION**n)
-            phase = (octave_weight, octave_phase, octave_power)
+            # Henyey-Greenstein, normalised so an isotropic phase function is 1. The direct
+            # beam's single scattering, in units of the horizontal illuminance over pi -- the
+            # unit the two-stream reflectance below is in -- is p / (4 mu_sun): exact as the
+            # optical depth goes to zero, and the whole of the silver lining.
+            mu_sun = max(abs(float(sun[1])), MIN_SUN_COSINE)
+            single = (1.0 - g * g) / np.power(1.0 + g * g - 2.0 * g * cos_theta, 1.5)
+            single = single / (4.0 * mu_sun)
+            backward_prev = np.zeros(shape, dtype=np.float64)
+            forward_prev = np.zeros(shape, dtype=np.float64)
+            depth_entry = np.zeros(shape, dtype=np.float64)
+            tau_since_entry = np.zeros(shape, dtype=np.float64)
+            d_tau_prev = np.zeros(shape, dtype=np.float64)
 
         # A ray at one degree of elevation crosses 69 km of a 1.2 km slab, and marching that
         # with a fixed step count puts the samples 1.4 km apart -- coarser than the clouds. The
@@ -1310,69 +1396,55 @@ class CloudField:
             weight = sigma * transmittance * step
             height_sum += weight * py
             height_weight += weight
+            # Energy-conserving in-scatter of the skylight (Hillaire 2015): what this step
+            # removes from the ray, ``T (1 - e^-dtau)``, times the albedo, comes back as the
+            # light the medium is bathed in. Split by height: a sample at the top sees the sky,
+            # one at the base the ground, and the diffusion profile in between is close to linear.
+            scatter = VISIBLE_DROPLET_ALBEDO * transmittance * (1.0 - np.exp(-d_tau))
+            height = np.clip((py - self.base_m) / max(self.thickness_m, 1e-9), 0.0, 1.0)
+            ambient_above += scatter * height
+            ambient_below += scatter * (1.0 - height)
             if radiance is not None:
-                sun_t = np.clip(self._sample(light, px, py, pz), 1e-6, 1.0)
-                weights, phases, powers = phase
-                scattered = np.zeros_like(sun_t)
-                for w, ph, a in zip(weights, phases, powers):
-                    # `sun_t ** a` is `exp(-a * tau_sun)`: the same path, less attenuated, which
-                    # is what a photon that has already bounced sees.
-                    scattered = scattered + w * (sun_t**a) * ph
-                radiance += transmittance * (1.0 - np.exp(-d_tau)) * (scattered + ambient)
+                tau_toward = self._sample(toward, px, py, pz)
+                tau_away = self._sample(away, px, py, pz)
+                backward, forward = _diffuse_sunlight(tau_toward, tau_away)
+                chord = tau_toward + tau_away
+                depth = np.where(chord > 1e-12, tau_toward / np.maximum(chord, 1e-12), 0.0)
+                inside = d_tau > 0.0
+                both = inside & (d_tau_prev > 0.0)
+                gap = np.maximum(0.5 * (d_tau + d_tau_prev), 1e-9)
+                # Which stream travels toward the viewer. Going into the cloud through its lit
+                # face the depth fraction rises along the ray, and what comes back out is the
+                # backward stream; through its dark face it falls, and it is the forward one. A
+                # grazing ray, along which it hardly changes, reads both: the face's own value.
+                # So I = backward + forward, less the stream travelling away from the viewer, by
+                # how clearly the ray crosses the profile (u = +-1 straight through a layer).
+                # Judged from the change since the ray entered this cloud, not from one step: the
+                # light maps' quadrature makes the depth fraction a staircase at the scale of a
+                # light-map step, and a step's change flickers between nothing and a jump.
+                depth_entry = np.where(both, depth_entry, depth)
+                tau_since_entry = np.where(both, tau_since_entry + gap, 0.0)
+                crossing = chord * (depth - depth_entry) / np.maximum(tau_since_entry, gap)
+                u = np.where(both, np.tanh(2.0 * crossing), 0.0)
+                keep_forward = 1.0 - np.maximum(u, 0.0)
+                keep_backward = 1.0 - np.maximum(-u, 0.0)
+                stream = keep_backward * backward + keep_forward * forward
+                # The source that stream implies: dI/dtau = I - S along the ray (tau increasing
+                # away from the viewer), so S = I - dI/dtau. Straight through a uniform layer it
+                # returns the face value exactly at any depth; a grazing ray, with no gradient,
+                # gets its own optical depth's share and no more. Differenced only between two
+                # samples in cloud (outside it the stream is not zero but undefined), and with
+                # this sample's choice of stream applied to both, so that the choice itself never
+                # reads as a gradient.
+                before = keep_backward * backward_prev + keep_forward * forward_prev
+                slope = np.where(both, (stream - before) / gap, 0.0)
+                diffuse = np.maximum(stream - slope, 0.0)
+                radiance += scatter * (single * np.exp(-tau_toward) + diffuse + ambient)
+                backward_prev = np.where(inside, backward, 0.0)
+                forward_prev = np.where(inside, forward, 0.0)
+                d_tau_prev = d_tau
             optical += d_tau
             transmittance = transmittance * np.exp(-d_tau)
-
-        if radiance is not None:
-            # --- energy from two-stream, detail from the march ------------------------------
-            # The march above gives the *shape* of the light -- which flank faces the sun, where
-            # the rim glows, how deep the shadow is -- but it cannot give the right amount of it.
-            # Its value is bounded by the mean of the scattered term, so a cloud of optical depth
-            # 60 comes out no brighter than one of depth 20, where the real albedos are 0.89 and
-            # 0.72. Multiple scattering is exactly the part a forward march does not carry.
-            #
-            # So the magnitude comes from the two-stream reflectance of a conservatively
-            # scattering layer, R = (1-g) tau / (2 mu0 + (1-g) tau), and the march supplies a
-            # normalised modulation around it: 1 where the sample is fully lit by an isotropic
-            # phase function, more on a forward-scattering rim, less in shadow.
-            intercepted = 1.0 - transmittance
-            mu_sun = max(abs(float(sun[1])), 0.05)
-            g = CLOUD_ASYMMETRY_G
-            # Which face of the layer the ray sees. Looking up at a cloud the sun lights from
-            # above, what reaches the eye is the light the layer lets *through*: its diffuse
-            # transmission, 1 - R - exp(-tau / mu0). Looking down on it (or up at a cloud lit
-            # from below the horizon) it is the reflection R. Using R for both was the dark rim
-            # on every thin edge seen from the ground: a thin layer reflects almost nothing but
-            # forward-scatters a great deal, so it should glow brighter than the sky behind it.
-            # tau is the ray's own optical depth brought to the vertical, which for a ray
-            # through the whole slab is the layer's optical thickness.
-            layer_tau = optical * np.maximum(np.abs(dy), 0.02)
-            reflected = ((1.0 - g) * layer_tau) / (2.0 * mu_sun + (1.0 - g) * layer_tau)
-            transmitted = np.clip(1.0 - reflected - np.exp(-layer_tau / mu_sun), 0.0, 1.0)
-            from_below = (dy > 0.0) == (float(sun[1]) > 0.0)
-            layer = np.where(from_below, transmitted, reflected)
-            # The old envelope, kept for the rays it was right for (seen from the lit side).
-            albedo = ((1.0 - g) * optical) / (2.0 * mu_sun + (1.0 - g) * optical)
-            # The march's mean scattered value along this ray, against what the same ray would
-            # have got with nothing shadowing it. The reference is per-ray because it carries the
-            # phase function, so a rim facing the sun is compared against its own bright limit
-            # rather than against an average taken over the frame -- which would make the result
-            # depend on how much cloud happened to be in shot.
-            weights, phases, _ = phase
-            fully_lit = sum(w * ph for w, ph in zip(weights, phases)) + ambient
-            shading = np.where(
-                intercepted > 1e-6, radiance / np.maximum(intercepted, 1e-6), 0.0
-            )
-            modulation = np.clip(shading / np.maximum(fully_lit, 1e-9), 0.0, 1.0)
-            # From below, a cloud is at least as bright as the light it transmits. For a thin
-            # layer that is several times the reflection-based envelope, and it is not multiplied
-            # by the intercepted fraction again (a thin edge would vanish as tau squared). A thick
-            # one keeps the envelope, which also stands in for the skylight and ground light a
-            # base receives and the transmission alone leaves out: its bases stay grey, not black,
-            # and the dome's exposure, calibrated on them, keeps its meaning.
-            envelope = np.where(from_below,
-                                np.maximum(layer, BASE_ENVELOPE * intercepted * albedo),
-                                intercepted * albedo)
-            radiance = envelope * (MS_SHADOW_FLOOR + (1.0 - MS_SHADOW_FLOOR) * modulation)
 
         emission_height = np.where(
             height_weight > 1e-12,
@@ -1384,6 +1456,8 @@ class CloudField:
             transmittance=transmittance,
             emission_height_m=emission_height,
             radiance=radiance,
+            ambient_above=ambient_above,
+            ambient_below=ambient_below,
         )
 
 

@@ -320,52 +320,77 @@ def test_a_clear_midday_sky_is_exposed_where_the_measurement_put_it():
     assert 100.0 < float(np.median(luminance)) * exposure < 250.0
 
 
+def _sky_luminance(image, *, metered=False):
+    """The upper hemisphere's luminance; ``metered`` leaves out the cones the meter leaves out."""
+    import math
+
+    from weather_fx.core.sky import METER_EXCLUSION_DEG, latlong_directions
+
+    directions = latlong_directions(image.shape[0])
+    keep = directions[..., 1] > 0.0
+    if metered:
+        limit = math.cos(math.radians(METER_EXCLUSION_DEG))
+        for body in (image.conditions.sun, image.conditions.moon):
+            if body.elevation_deg > -METER_EXCLUSION_DEG:
+                keep &= directions @ body.direction() < limit
+    return image[keep].mean(axis=-1)
+
+
 def test_a_sunset_does_not_clip_the_way_a_median_meter_made_it():
     """The defect this rule replaced. Metering on the median put a 4 degree sun's highlights 2.4x
-    above where noon puts them, so the entire solar half of the frame rendered white."""
-    from weather_fx.core.sky import dome_exposure, latlong_directions
+    above where noon puts them, so the entire solar half of the frame rendered white.
+
+    Measured two ways, since WX.3 lit the cloud physically. The bulk of the frame: a sunset's
+    median is no brighter than noon's (0.92 of it; the old dome's sunset, a flat yellow wash, was
+    1.32). And the metered highlights stay inside the meter's headroom (0.9 of it). A cloud face
+    a 4 degree sun lights square-on is far brighter than the ground that sun grazes, so the
+    brightest percent of a sunset is brighter than noon's -- as it is in a photograph exposed for
+    the ground, which is what the incident meter does by design."""
+    from weather_fx.core.sky import DOME_HIGHLIGHT_TARGET, HIGHLIGHT_HEADROOM, dome_exposure
 
     noon, sunset = _sky_at(12.97, cover=0.35), _sky_at(18.73, cover=0.35, turbidity=3.6)
-    peaks = []
+    median = []
     for image in (noon, sunset):
-        luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
-        peaks.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image, image.conditions))
-    # 1.3, not 1.0: the percentile here includes the 25 degrees around the sun that the meter
-    # leaves out on purpose, and at a low sun that is where the backlit cloud rims are -- brighter
-    # since the field's edges are sharp rather than a 60 m interpolation ramp. The defect this
-    # guards against was 2.4x.
-    assert peaks[1] < 1.3 * peaks[0]
+        median.append(float(np.median(_sky_luminance(image)))
+                      * dome_exposure(image, image.conditions))
+    assert median[1] < 1.3 * median[0]
+    metered = float(np.percentile(_sky_luminance(sunset, metered=True), 99.0))
+    assert metered * dome_exposure(sunset, sunset.conditions) < (
+        HIGHLIGHT_HEADROOM * DOME_HIGHLIGHT_TARGET)
 
 
 def test_civil_twilight_does_not_run_the_exposure_to_its_clamp():
-    """The other direction, and the uglier one: the median of the upper hemisphere at a -9 degree
-    sun is zero to float precision, so a median meter divided by nothing and returned a white
-    frame at the darkest moment of the day."""
-    from weather_fx.core.sky import dome_exposure, latlong_directions
+    """The other direction, and the uglier one: a median meter at a -9 degree sun divided by
+    almost nothing and returned a white frame at the darkest moment of the day. (The median was
+    zero to float precision only because the old dome's clouds had no sky light and rendered
+    black at twilight; lit by the twilight sky, as since WX.3, they are grey.)"""
+    from weather_fx.core.sky import dome_exposure
 
     image = _sky_at(20.5, cover=0.3, turbidity=3.0)
-    luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
-    peak = float(np.percentile(luminance, 99.0))
-    # The trap is real: the median is orders of magnitude below the highlights.
-    assert float(np.median(luminance)) < 1e-2 * peak
+    peak = float(np.percentile(_sky_luminance(image), 99.0))
     rendered = peak * dome_exposure(image, image.conditions)
     assert 50.0 < rendered < 450.0
 
 
 def test_the_day_stays_brighter_than_the_night_by_a_legible_margin():
     """An adaptation, not a normalisation. Seven decades of physical luminance are compressed,
-    but the order and a readable gap have to survive or the gallery is a set of grey squares."""
-    from weather_fx.core.sky import dome_exposure, latlong_directions
+    but the order and a readable gap have to survive or the gallery is a set of grey squares.
+
+    Read the way the meter reads, outside the cones round the sun and the moon: inside them sit
+    the silver linings, physically the brightest thing in any cloudy sky, and the meter leaves
+    them out on purpose."""
+    from weather_fx.core.sky import DOME_HIGHLIGHT_TARGET, HIGHLIGHT_HEADROOM, dome_exposure
 
     rendered = []
     for hour, cover, date in ((12.97, 0.35, "2024-06-21"), (18.73, 0.35, "2024-06-21"),
                               (20.5, 0.3, "2024-06-21"), (0.83, 0.25, "2024-07-23")):
         image = _sky_at(hour, cover=cover, date=date)
-        luminance = image[latlong_directions(image.shape[0])[..., 1] > 0.0].mean(axis=-1)
-        rendered.append(float(np.percentile(luminance, 99.0)) * dome_exposure(image, image.conditions))
-    # Sunset against noon is held to the highlight rule above (its backlit rims sit in the band
-    # the meter excludes); from sunset down the order must be strict.
-    assert rendered[1] < 1.3 * rendered[0], rendered
+        luminance = _sky_luminance(image, metered=True)
+        rendered.append(float(np.percentile(luminance, 99.0))
+                        * dome_exposure(image, image.conditions))
+    # Sunset's highlights are held by the meter's headroom (above); from sunset down the order
+    # must be strict.
+    assert rendered[1] < HIGHLIGHT_HEADROOM * DOME_HIGHLIGHT_TARGET, rendered
     assert all(a > b for a, b in zip(rendered[1:], rendered[2:])), rendered
     assert rendered[0] / rendered[-1] > 4.0     # night is clearly night
     assert rendered[0] / rendered[-1] < 100.0   # and not simply black

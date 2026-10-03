@@ -441,21 +441,71 @@ def _composite_cloud(
     return sky * transmittance[..., None] + added
 
 
-def _cloud_terms(directions: np.ndarray, conditions: SkyConditions) -> Tuple[np.ndarray, np.ndarray]:
+#: Directions the skylight a cloud is bathed in is averaged over: a Fibonacci sphere, so every
+#: direction has the same solid angle and a plain mean is the solid-angle mean.
+AMBIENT_DIRECTIONS = 1024
+
+
+def _fibonacci_sphere(n: int) -> np.ndarray:
+    i = np.arange(n) + 0.5
+    y = 1.0 - 2.0 * i / n
+    r = np.sqrt(np.clip(1.0 - y * y, 0.0, 1.0))
+    phi = math.pi * (3.0 - math.sqrt(5.0)) * i
+    return np.stack([r * np.cos(phi), y, r * np.sin(phi)], axis=-1)
+
+
+def cloud_ambient_rgb(conditions: SkyConditions) -> Tuple[np.ndarray, np.ndarray]:
+    """The radiance a cloud is bathed in from above and from below: ``(L_above, L_below)``.
+
+    The solid-angle means of this sky's own clear radiance over the upper hemisphere (the sky)
+    and the lower one (the lit ground seen through the air), before the dome's exposure. They
+    are what :attr:`MarchResult.ambient_above` and ``ambient_below`` weight, so the cloud is lit
+    by the sky it is drawn in front of -- blue from above, the ground's colour from below -- and
+    a cloud under a uniform sky adds back exactly what it removes (docs/physics-model.md §7.5,
+    the white furnace).
+    """
+    d = _fibonacci_sphere(AMBIENT_DIRECTIONS)
+    clear = sky_radiance_rgb(d, _without_cloud(conditions))
+    clear = clear / max(float(conditions.exposure_scale), 1e-12)
+    up = d[:, 1] > 0.0
+    return clear[up].mean(axis=0), clear[~up].mean(axis=0)
+
+
+def _cloud_terms(
+    directions: np.ndarray,
+    conditions: SkyConditions,
+    *,
+    ambient: Optional[Tuple[Any, Any]] = None,
+    sunlit: bool = True,
+    origin_m: Any = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """What the cloud does along each direction: ``(transmittance, added luminance)``.
 
     Kept as two terms so a caller can march coarsely and upsample them without blurring the sky
-    behind the cloud: ``out = transmittance * sky + added``.
+    behind the cloud: ``out = transmittance * sky + added``. That is the premultiplied
+    composite, and ``added`` is the sum of two lights, each energy-conserving on its own:
+
+    * the **sun's** (or the moon's), scattered once and many times, from the march's
+      ``radiance`` -- skipped when ``sunlit`` is false;
+    * the **sky's and the ground's**, from the march's ``ambient_above`` and ``ambient_below``
+      times ``ambient`` = ``(L_above, L_below)``, by default :func:`cloud_ambient_rgb`.
+
+    The rays start 2 m above the observer's column, less the wind's drift, unless ``origin_m``
+    (the field's Y-up frame, metres, broadcast against the directions) puts them elsewhere -- an
+    observer in the air, or a test looking at a cloud's flank from its own height.
     """
     field = conditions.cloud
     assert field is not None
-    origin = np.zeros(directions.shape, dtype=np.float64)
-    origin[..., 0] = -conditions.cloud_offset_m[0]
-    origin[..., 1] = 2.0
-    origin[..., 2] = -conditions.cloud_offset_m[2]
+    if origin_m is None:
+        origin = np.zeros(directions.shape, dtype=np.float64)
+        origin[..., 0] = -conditions.cloud_offset_m[0]
+        origin[..., 1] = 2.0
+        origin[..., 2] = -conditions.cloud_offset_m[2]
+    else:
+        origin = np.broadcast_to(np.asarray(origin_m, dtype=np.float64), directions.shape)
 
     lit_by = conditions.sun if conditions.sun.elevation_deg > 0.0 else conditions.moon
-    sun_direction = lit_by.direction() if lit_by.elevation_deg > 0.0 else None
+    sun_direction = lit_by.direction() if (sunlit and lit_by.elevation_deg > 0.0) else None
     result = field.march(
         origin, directions, sun_direction=sun_direction, steps=int(conditions.march_steps)
     )
@@ -478,6 +528,11 @@ def _cloud_terms(directions: np.ndarray, conditions: SkyConditions) -> Tuple[np.
             tint = np.asarray(MOONLIGHT_TINT) * reddening
         added = (result.radiance[..., None] * source / math.pi * tint * 1e-4
                  * _cloud_colour(result.radiance, result.transmittance, conditions))
+    if result.ambient_above is not None:
+        above, below = cloud_ambient_rgb(conditions) if ambient is None else ambient
+        added = (added
+                 + result.ambient_above[..., None] * np.asarray(above, dtype=np.float64)
+                 + result.ambient_below[..., None] * np.asarray(below, dtype=np.float64))
     return result.transmittance, added
 
 

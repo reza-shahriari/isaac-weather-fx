@@ -367,9 +367,12 @@ def test_the_finest_pitch_is_the_edge_detail_s_cell_when_the_detail_is_on() -> N
 
 
 def _oblique_transmittance(f: CloudField, pitch_m: float) -> np.ndarray:
-    """Midpoint-rule transmittance through the slab on fixed oblique rays, two samples per pitch."""
+    """Midpoint-rule transmittance through the slab on fixed oblique rays, two samples per pitch.
+
+    2000 rays, of which about 300 cross an edge: with 200 the 99th percentile was the second-worst
+    ray, and moving one cloud (WX.6's sizes) moved it by a factor of two."""
     rng = np.random.default_rng(3)
-    n = 200
+    n = 2000
     el = np.radians(rng.uniform(15.0, 40.0, n))
     az = rng.uniform(0.0, 2.0 * np.pi, n)
     d = np.stack([np.cos(el) * np.sin(az), np.sin(el), -np.cos(el) * np.cos(az)], axis=-1)

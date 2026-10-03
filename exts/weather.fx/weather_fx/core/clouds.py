@@ -75,6 +75,9 @@ __all__ = [
     "ice_extinction_per_m",
     "ice_water_content_g_m3",
     "DETAIL_STRENGTH",
+    "COVERAGE_SMALLEST_FEATURE",
+    "CELLULAR_OCTAVES",
+    "CELLULAR_DECAY",
 ]
 
 @dataclass(frozen=True)
@@ -176,7 +179,9 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         ice_effective_diameter_um=70.0,
         ice_fraction=0.25,
     ),
-    # Stratocumulus: a broken sheet with rolls, thin and nearly uniform in the vertical.
+    # Stratocumulus: a broken sheet of cells, thin and nearly uniform in the vertical. Isotropic:
+    # broken stratocumulus organises as mesoscale cells (Wood 2012), and a stretch along a fixed
+    # axis of the field, whatever the wind, drew it as a barcode of streaks.
     "stratocumulus": CloudProfile(
         name="stratocumulus",
         height_points=(0.0, 0.10, 0.55, 0.85, 1.0),
@@ -185,7 +190,6 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         optical_depth=12.0,
         erosion=0.25,
         beta=3.0,
-        anisotropy=2.5,
         billow=0.6,
         columnar=0.45,
         spacing=6.0,
@@ -419,6 +423,24 @@ def _periodic_worley(
     return 1.0 - np.clip(np.sqrt(best), 0.0, 1.0)
 
 
+def _cellular_octaves(shape: Tuple[int, int, int], lattice: int, seed: int,
+                      octaves: int = 0) -> np.ndarray:
+    """Inverted Worley noise in the horizontal at ``lattice`` cells across and finer octaves of it.
+
+    Octave ``o`` has ``lattice * 2**o`` cells and weight ``CELLULAR_DECAY**o``: thermals of every size down
+    from the spacing, the larger ones stronger. Normalised to the same 0..1 range as one octave.
+    """
+    octaves = octaves or CELLULAR_OCTAVES
+    out = np.zeros(shape, dtype=np.float32)
+    total = 0.0
+    for octave in range(octaves):
+        weight = CELLULAR_DECAY**octave
+        n = lattice * 2**octave
+        out += weight * _periodic_worley(shape, (1, n, n), seed + 31 * octave)
+        total += weight
+    return out / total
+
+
 def _worley_fbm(shape: Tuple[int, int, int], cell_size_m: Tuple[float, float, float],
                 blob_m: float, seed: int, octaves: int = 3) -> np.ndarray:
     """Three octaves of inverted Worley noise, blobs about ``blob_m`` across at the first.
@@ -619,6 +641,21 @@ _LEVEL_RAY_LENGTH_M = 40_000.0
 _MARCH_GROWTH = 3.0
 
 
+#: The coverage map's smallest feature, as a fraction of :attr:`CloudField.feature_m`. The map
+#: places the clouds, so its band sets their sizes: cut at two features (800 m) it held one scale,
+#: and a cumulus field came out as clouds about a kilometre across plus specks of edge detail, a
+#: size exponent of 2.4 where real fields give 1.7-2.0. At half a feature the sizes run on down to
+#: the detail's (``core.morphology``: 1.91 at 35 % cover and 1.73 at 15 %, with the cellular
+#: octaves below; ``tools/measure_cloud_shape.py``).
+COVERAGE_SMALLEST_FEATURE = 0.5
+#: Octaves of the cellular (thermal) term in the coverage map, each lattice twice as fine and
+#: :data:`CELLULAR_DECAY` as strong. One octave put every thermal at one spacing, a preferred cloud
+#: size real fields do not have; three let small thermals grow between the large ones.
+CELLULAR_OCTAVES = 3
+#: Strength of each cellular octave relative to the one before. Sets how many small clouds there
+#: are for each large one: 0.5 gave a size exponent of 2.0 at 35 % cover, 0.7 gave 1.67 at 15 %.
+CELLULAR_DECAY = 0.6
+
 #: Default strength of the fine detail, in threshold units (see :attr:`CloudField.detail_strength`).
 DETAIL_STRENGTH = 0.04
 #: Cells per side of the fine detail texture, and how much finer its cell is than the field's.
@@ -752,7 +789,7 @@ class CloudField:
                 beta,
                 self.seed + 1543,
                 cell_size_m=(vertical_m, self.cell_m, self.cell_m),
-                min_wavelength_m=2.0 * self.feature_m,
+                min_wavelength_m=COVERAGE_SMALLEST_FEATURE * self.feature_m,
                 anisotropy=self.profile.anisotropy,
                 max_wavelength_m=spacing_m,
             )
@@ -761,8 +798,7 @@ class CloudField:
                 # A convective field is a set of separate thermals, each its own cloud: a cellular
                 # noise gives every cloud a centre to grow round, spaced about spacing_m apart.
                 lattice = max(1, int(round(self.cells * self.cell_m / spacing_m)))
-                cells = _periodic_worley((1, self.cells, self.cells), (1, lattice, lattice),
-                                         self.seed + 2711)
+                cells = _cellular_octaves((1, self.cells, self.cells), lattice, self.seed + 2711)
                 # The fractal decides how big each cell's cloud grows, and leaves some empty:
                 # equal clouds on a lattice would read as a pattern, not as weather.
                 modulated = _rank_normalise(cells * (0.35 + column))

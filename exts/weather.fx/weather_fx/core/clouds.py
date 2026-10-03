@@ -541,6 +541,10 @@ class MarchResult:
     #: adds back precisely what it removed: the white furnace (docs/physics-model.md §7.5).
     ambient_above: np.ndarray | None = None
     ambient_below: np.ndarray | None = None
+    #: How far along the ray the light the cloud scatters toward the sensor comes from, metres:
+    #: the mean distance weighted by each step's in-scatter. What the air in front of the cloud
+    #: is measured to (aerial perspective). 0 where the ray meets no cloud.
+    emission_range_m: np.ndarray | None = None
 
 
 #: Henyey-Greenstein asymmetry for cloud droplets in the visible. Strongly forward-scattering,
@@ -1315,6 +1319,7 @@ class CloudField:
         radiance = None if sun_direction is None else np.zeros(shape, dtype=np.float64)
         ambient_above = np.zeros(shape, dtype=np.float64)
         ambient_below = np.zeros(shape, dtype=np.float64)
+        range_sum = np.zeros(shape, dtype=np.float64)
 
         hit = far > near
         if not np.any(hit) or self.cover <= 0.0:
@@ -1325,6 +1330,7 @@ class CloudField:
                 radiance=radiance,
                 ambient_above=ambient_above,
                 ambient_below=ambient_below,
+                emission_range_m=np.zeros(shape, dtype=np.float64),
             )
 
         toward = away = None
@@ -1404,6 +1410,7 @@ class CloudField:
             height = np.clip((py - self.base_m) / max(self.thickness_m, 1e-9), 0.0, 1.0)
             ambient_above += scatter * height
             ambient_below += scatter * (1.0 - height)
+            range_sum += scatter * t
             if radiance is not None:
                 tau_toward = self._sample(toward, px, py, pz)
                 tau_away = self._sample(away, px, py, pz)
@@ -1458,6 +1465,11 @@ class CloudField:
             radiance=radiance,
             ambient_above=ambient_above,
             ambient_below=ambient_below,
+            emission_range_m=np.where(
+                ambient_above + ambient_below > 1e-12,
+                range_sum / np.maximum(ambient_above + ambient_below, 1e-12),
+                0.0,
+            ),
         )
 
 

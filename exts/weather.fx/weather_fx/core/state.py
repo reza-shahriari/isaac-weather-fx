@@ -314,6 +314,10 @@ class CloudParams:
     dome_rows: int = param(256, "Dome cloud rows", min=64, max=2048, advanced=True,
                            tooltip="Resolution the dome's cloud layer is marched at before it is "
                                    "upsampled (real-time path). Higher is sharper and slower.")
+    aerial_perspective: bool = param(True, "Aerial perspective", advanced=True,
+                                     tooltip="See each cloud through the air in front of it: a "
+                                             "far cloud fades into the horizon's haze, a near one "
+                                             "stays crisp.")
     dome_edge_rays: int = param(2, "Dome edge rays", min=1, max=4, advanced=True,
                                 tooltip="Rays per side marched through a dome texel a cloud edge "
                                         "crosses, averaged (twice as many below 15 degrees, where "

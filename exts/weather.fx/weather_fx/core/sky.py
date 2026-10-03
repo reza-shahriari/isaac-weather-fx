@@ -213,6 +213,9 @@ class SkyConditions:
     #: Rays per side through a dome texel a cloud edge crosses, twice that below
     #: :data:`DOME_GRAZING_DEG`; 1 marches every texel once (:func:`_integrate_cloud_edges`).
     cloud_edge_rays: int = 2
+    #: Whether a cloud is seen through the air in front of it: its light attenuated by the air's
+    #: transmittance to its emission range, and the air's own in-scatter laid in front (WX.5).
+    aerial_perspective: bool = True
 
     @property
     def daylight(self) -> float:
@@ -273,6 +276,7 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         cloud_shadow_colour=tuple(getattr(clouds, "shadow_color", (1.0, 1.0, 1.0))),
         cloud_rows=int(getattr(clouds, "dome_rows", 256)),
         cloud_edge_rays=int(getattr(clouds, "dome_edge_rays", 2)),
+        aerial_perspective=bool(getattr(clouds, "aerial_perspective", True)),
     )
 
 
@@ -537,7 +541,102 @@ def _cloud_terms(
         added = (added
                  + result.ambient_above[..., None] * np.asarray(above, dtype=np.float64)
                  + result.ambient_below[..., None] * np.asarray(below, dtype=np.float64))
+    if (conditions.aerial_perspective and conditions.model == "atmosphere"
+            and result.emission_range_m is not None):
+        # Aerial perspective. The sky behind the cloud is the air's in-scatter all the way out,
+        # L_sky = L_in(0, R) + T_air(R) L_in(R, inf); the cloud at R blocks only the second term.
+        # So what reaches the eye is L_in(0, R) + T_air(R) added + T_c (L_sky - L_in(0, R)):
+        # premultiplied, the transmittance stays T_c and the added light becomes
+        # T_air(R) added + (1 - T_c) L_in(0, R). A far cloud fades into the horizon's colour.
+        # The direct beam's share of that air light is lost where the air is in a cloud's shadow
+        # -- under a broken deck, much of the air below the base; looking toward the sun, the air
+        # in front of the cloud is in that cloud's own shadow.
+        visible = (_air_sun_visibility(field, origin, directions, result.emission_range_m,
+                                       lit_by.direction())
+                   if lit_by.elevation_deg > 0.0 else None)
+        inscatter, air = aerial_perspective_rgb(
+            directions, result.emission_range_m, conditions, sun_visibility=visible,
+            observer_height_m=float(np.mean(origin[..., 1])))
+        added = air * added + (1.0 - result.transmittance)[..., None] * inscatter
     return result.transmittance, added
+
+
+#: Points along the air below a cloud's base at which the sun's transmittance through the field is
+#: read, to shadow the air light in front of the cloud (:func:`_air_sun_visibility`).
+AIR_SHADOW_SAMPLES = 4
+
+
+def _air_sun_visibility(field: Any, origin: np.ndarray, directions: np.ndarray, range_m: Any,
+                        sun_direction: Any) -> np.ndarray:
+    """The mean transmittance toward the sun of the air between the observer and the cloud, below
+    the cloud base: the fraction of the direct beam the air in front of the cloud still receives.
+
+    Read from the field's own light map at the point where each sample's sun ray enters the slab,
+    so the air in a cloud's shadow is dark exactly where the cloud is. Above the base the air is
+    taken as sunlit. 1 where the ray meets no cloud or starts above the base.
+    """
+    from weather_fx.core.clouds import LIGHT_MAP_COARSEN, LIGHT_MAP_VERTICAL_COARSEN
+
+    sun = np.asarray(sun_direction, dtype=np.float64)
+    sun = sun / max(float(np.linalg.norm(sun)), 1e-12)
+    d = np.asarray(directions, dtype=np.float64)
+    o = np.broadcast_to(np.asarray(origin, dtype=np.float64), d.shape)
+    rng = np.asarray(range_m, dtype=np.float64)
+    if sun[1] <= 1e-6:
+        return np.ones(rng.shape)
+    toward = field.sun_optical_depth(sun, coarsen=LIGHT_MAP_COARSEN,
+                                     vertical_coarsen=LIGHT_MAP_VERTICAL_COARSEN)
+    dy = d[..., 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        to_base = np.where(dy > 1e-6, (field.base_m - o[..., 1]) / dy, rng)
+    length = np.clip(np.minimum(rng, to_base), 0.0, None)
+    visible = np.zeros(rng.shape)
+    for j in range(AIR_SHADOW_SAMPLES):
+        t = (j + 0.5) / AIR_SHADOW_SAMPLES * length
+        p = o + d * t[..., None]
+        up = (field.base_m + 1.0 - p[..., 1]) / sun[1]
+        q = p + sun * up[..., None]
+        visible += np.exp(-field._sample(toward, q[..., 0], q[..., 1], q[..., 2]))
+    return np.where(length > 0.0, visible / AIR_SHADOW_SAMPLES, 1.0)
+
+
+def aerial_perspective_rgb(
+    directions: np.ndarray, distance_m: Any, conditions: SkyConditions, *,
+    sun_visibility: Any = None, observer_height_m: float = 2.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """``(inscatter, transmittance)`` of the air from the observer to ``distance_m`` along each
+    direction: the luminance the air adds in front of a point there (cd/m2, before the dome's
+    exposure, sun and moon together) and the RGB fraction of the point's own light that arrives.
+
+    From :func:`atmosphere.aerial_perspective`, the sky view's own scattering integral kept at
+    distance slices, so a point at infinity is exactly the sky. The atmosphere model only; the
+    Preetham fit has no distances to give, and returns no air. ``sun_visibility`` (per
+    direction, 0..1) scales the direct beam's share of the air light, for air in a cloud's
+    shadow; the multiply-scattered share is kept whole.
+    """
+    d = np.asarray(directions, dtype=np.float64)
+    shape = d.shape[:-1]
+    if conditions.model != "atmosphere":
+        return np.zeros(shape + (3,)), np.ones(shape + (3,))
+    atm = atmosphere.atmosphere_for(conditions.turbidity, conditions.ground_albedo)
+    elevation = np.arcsin(np.clip(d[..., 1], -1.0, 1.0))
+    distance = np.asarray(distance_m, dtype=np.float64)
+    inscatter = np.zeros(shape + (3,))
+    visible = 1.0 if sun_visibility is None else np.asarray(sun_visibility)[..., None]
+    sun = conditions.sun
+    view = atmosphere.aerial_perspective(atm, sun.elevation_deg, observer_height_m)
+    direct, multiple, transmittance = view.at(elevation, _relative_azimuth(d, sun), distance)
+    if sun.elevation_deg > -18.0:
+        inscatter += (direct * visible + multiple) * atmosphere.SOLAR_ILLUMINANCE_LUX
+    moon = conditions.moon
+    if moon.is_up and conditions.moon_lux > 0.0:
+        mu = math.sin(math.radians(max(moon.elevation_deg, 1.0)))
+        t_ground = float(atmosphere.transmittance_to_space(0.0, mu, atm)[1])
+        source = conditions.moon_lux / (mu * max(t_ground, 1e-3))
+        moon_view = atmosphere.aerial_perspective(atm, moon.elevation_deg, observer_height_m)
+        moon_direct, moon_multiple, _ = moon_view.at(elevation, _relative_azimuth(d, moon), distance)
+        inscatter += (moon_direct + moon_multiple) * source * np.asarray(MOONLIGHT_TINT)
+    return inscatter, transmittance
 
 
 def _cloud_colour(radiance: np.ndarray, transmittance: np.ndarray, conditions: SkyConditions) -> np.ndarray:

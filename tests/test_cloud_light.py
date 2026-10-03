@@ -16,6 +16,7 @@ envelope applied to every base and top alike.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -58,7 +59,11 @@ def test_a_white_cloud_under_a_uniform_sky_vanishes(noon) -> None:
     sun, so the same cloud was a black shape at the cloud's own transmittance."""
     directions = _directions(5.0, 89.0, 0.0, 180.0, 3000, seed=1)
     sky = np.array([1000.0, 1000.0, 1000.0])
-    transmittance, added = S._cloud_terms(directions, noon, ambient=(sky, sky), sunlit=False)
+    # The furnace is the cloud's own scattering, so the real atmosphere's air in front of it is
+    # left out: under a sky this uniform, uniform air would add (1 - T_air) L0 and the cloud would
+    # still vanish, but the table's air is a real noon's.
+    furnace = dataclasses.replace(noon, aerial_perspective=False)
+    transmittance, added = S._cloud_terms(directions, furnace, ambient=(sky, sky), sunlit=False)
     out = transmittance[:, None] * sky + added
     cloudy = transmittance < 0.99
     assert cloudy.sum() > 300
@@ -204,3 +209,64 @@ def _single_forward(depth: float, mu0: float, g: float) -> float:
     k = 1.0 / mu0 - 1.0
     integral = math.exp(-depth) * (math.expm1(-k * depth) / -k if abs(k) > 1e-9 else depth)
     return phase / (4.0 * mu0) * integral
+
+
+# --- aerial perspective --------------------------------------------------------------------------
+
+
+def test_the_air_in_front_of_a_point_far_up_the_sky_is_the_sky() -> None:
+    """The aerial-perspective table is the sky view's own scattering integral kept at distances,
+    so far enough along an upward ray -- 64 km, where the air above is a trace -- the air light
+    is the sky itself: within 1.5 % from 30 degrees up. At 15 degrees 64 km reaches only 16.6 km
+    of height, and the air above that still adds up to 4 % of the blue."""
+    from weather_fx.core import atmosphere as A
+
+    atm = A.atmosphere_for(2.8)
+    for sun_el in (50.0, 15.0):
+        view = A.sky_view(atm, sun_el)
+        air = A.aerial_perspective(atm, sun_el)
+        for elevations, tolerance in (((30.0, 60.0, 85.0), 0.015), ((15.0,), 0.05)):
+            el = np.radians(np.array(elevations))
+            az = np.radians(np.linspace(10.0, 180.0, el.size))
+            direct, multiple, _ = air.at(el, az, np.full(el.size, A.AERIAL_PERSPECTIVE_MAX_M))
+            assert np.allclose(direct + multiple, view.radiance(el, az), rtol=tolerance)
+
+
+def test_contrast_falls_as_the_air_transmits_and_more_slowly_as_the_ray_climbs() -> None:
+    """Koschmieder: a black object's contrast against the horizon is the air's transmittance to
+    it -- exactly, in uniform air. Near the horizon at 5 km the table holds that to 5 %. Farther,
+    the ray climbs out of the aerosol layer and the sky behind the object is dimmer than uniform
+    air would make it, so the contrast stays above the transmittance, and more so with range:
+    1.02, 1.07 and 1.16 of it at 5, 15 and 30 km, 0.5 degrees up."""
+    from weather_fx.core import atmosphere as A
+
+    atm = A.atmosphere_for(2.8)
+    view, air = A.sky_view(atm, 40.0), A.aerial_perspective(atm, 40.0)
+    el, az = np.radians([0.5]), np.radians([90.0])
+    ratios = []
+    for distance in (5_000.0, 15_000.0, 30_000.0):
+        direct, multiple, transmittance = air.at(el, az, np.array([distance]))
+        contrast = 1.0 - (direct + multiple) / view.radiance(el, az)
+        ratios.append(float((contrast / transmittance).mean()))
+    assert ratios[0] == pytest.approx(1.0, abs=0.05)
+    assert 1.0 <= ratios[0] < ratios[1] < ratios[2] < 1.3
+
+
+def test_a_far_cloud_takes_the_colour_of_the_horizon_and_a_near_one_keeps_its_own(noon) -> None:
+    """With the air in front of it, a cloud 20 km off is much nearer the clear sky behind it than
+    without; one overhead, about a kilometre off, hardly changes."""
+    low = _directions(1.0, 4.0, 0.0, 180.0, 6000, seed=8)
+    high = _directions(70.0, 89.0, 0.0, 180.0, 3000, seed=9)
+    for directions, far in ((low, True), (high, False)):
+        clear = S.sky_radiance_rgb(directions, S._without_cloud(noon)) @ LUMA
+        hazy = S.sky_radiance_rgb(directions, noon) @ LUMA
+        bare = S.sky_radiance_rgb(
+            directions, dataclasses.replace(noon, aerial_perspective=False)) @ LUMA
+        cloudy = np.abs(bare - clear) > 0.05 * clear
+        assert cloudy.sum() > 100
+        before = np.mean(np.abs(bare - clear)[cloudy])
+        after = np.mean(np.abs(hazy - clear)[cloudy])
+        if far:
+            assert after < 0.6 * before
+        else:
+            assert after == pytest.approx(before, rel=0.15)

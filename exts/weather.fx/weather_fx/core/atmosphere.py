@@ -443,3 +443,127 @@ def _compute_sky_view(atm: AtmosphereParams, body_elevation_deg: float, observer
 
     luminance.setflags(write=False)
     return SkyView(table=luminance, horizon_elevation=horizon, irradiance=irradiance)
+
+
+# --------------------------------------------------------------------------- aerial perspective
+
+#: How far the aerial-perspective table reaches, metres. A cloud seen 2 degrees up has its base
+#: 29 km away; the march follows it up to 8 km further; beyond 64 km a cloud is behind so much air
+#: that it is the horizon's colour.
+AERIAL_PERSPECTIVE_MAX_M = 64_000.0
+_AP_SLICES = 16
+_AP_SUBSTEPS = 3
+
+
+@dataclass
+class AerialPerspective:
+    """The air between the observer and a point at a distance, for unit illuminance from one body.
+
+    ``inscatter`` is the luminance the air scatters toward the observer over the first ``d``
+    metres of each view direction; ``transmittance`` is what survives of light from ``d``. Both
+    are on the sky view's (elevation, azimuth-from-body) grid and on distance slices quadratic in
+    ``d`` up to :data:`AERIAL_PERSPECTIVE_MAX_M` (Hillaire 2020's aerial-perspective volume, on
+    the sky view's own angles). The last slice's inscatter is the sky view itself, so a point at
+    infinity is the sky.
+    """
+
+    inscatter: np.ndarray           # (rows, cols, slices + 1, 3): the direct beam's share
+    multiple: np.ndarray            # (rows, cols, slices + 1, 3): the multiply-scattered share
+    transmittance: np.ndarray       # (rows, cols, slices + 1, 3)
+    horizon_elevation: float
+
+    def at(self, elevation: Any, relative_azimuth: Any,
+           distance_m: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """``(direct, multiple, transmittance)``, each ``(..., 3)``, at a direction and a distance.
+
+        The in-scatter is returned in two parts because a cloud shadows them differently: the
+        direct beam's share is lost wherever the air is in a cloud's shadow, the multiply-scattered
+        share much less so."""
+        el = np.asarray(elevation, dtype=np.float64)
+        u = _elevation_to_u(el, self.horizon_elevation)
+        v = np.abs(np.angle(np.exp(1j * np.asarray(relative_azimuth, dtype=np.float64)))) / math.pi
+        rows, cols, n, _ = self.inscatter.shape
+        flat_in = _bilinear(self.inscatter.reshape(rows, cols, n * 3), u, v).reshape(el.shape + (n, 3))
+        flat_ms = _bilinear(self.multiple.reshape(rows, cols, n * 3), u, v).reshape(el.shape + (n, 3))
+        flat_t = _bilinear(self.transmittance.reshape(rows, cols, n * 3), u, v).reshape(el.shape + (n, 3))
+        w = np.sqrt(np.clip(np.asarray(distance_m, dtype=np.float64) / AERIAL_PERSPECTIVE_MAX_M,
+                            0.0, 1.0)) * (n - 1)
+        i0 = np.clip(np.floor(w).astype(np.int64), 0, n - 2)
+        f = (w - i0)[..., None]
+        take = lambda a, i: np.take_along_axis(a, i[..., None, None], axis=-2)[..., 0, :]
+        direct = take(flat_in, i0) * (1.0 - f) + take(flat_in, i0 + 1) * f
+        multiple = take(flat_ms, i0) * (1.0 - f) + take(flat_ms, i0 + 1) * f
+        transmittance = take(flat_t, i0) * (1.0 - f) + take(flat_t, i0 + 1) * f
+        return direct, multiple, transmittance
+
+
+@lru_cache(maxsize=16)
+def _aerial_perspective_cached(atm: AtmosphereParams, body_elevation_q: float,
+                               observer_m_q: float) -> AerialPerspective:
+    return _compute_aerial_perspective(atm, body_elevation_q, observer_m_q)
+
+
+def aerial_perspective(atm: AtmosphereParams, body_elevation_deg: float,
+                       observer_height_m: float = 2.0) -> AerialPerspective:
+    """The air in front of a point, for a body at an elevation. Cached like :func:`sky_view`."""
+    return _aerial_perspective_cached(atm, round(float(body_elevation_deg), 2),
+                                      round(max(float(observer_height_m), 0.5), 1))
+
+
+def _compute_aerial_perspective(atm: AtmosphereParams, body_elevation_deg: float,
+                                observer_m: float) -> AerialPerspective:
+    """The sky view's single-plus-multiple scattering integral, kept at each distance slice."""
+    trans = _transmittance_table(atm)
+    ms_table = _multiscattering_table(atm)
+    r0 = PLANET_RADIUS_M + observer_m
+    horizon = -math.acos(min(PLANET_RADIUS_M / r0, 1.0))
+    u = (np.arange(_SV_ROWS) + 0.5) / _SV_ROWS
+    v = (np.arange(_SV_COLS) + 0.5) / _SV_COLS
+    elevation = _u_to_elevation(u, horizon)
+    el, az = np.meshgrid(elevation, v * math.pi, indexing="ij")
+    mu_v = np.sin(el)
+    view = np.stack([np.cos(el) * np.cos(az), mu_v, np.cos(el) * np.sin(az)], axis=-1)
+    sun_el = math.radians(body_elevation_deg)
+    sun = np.array([math.cos(sun_el), math.sin(sun_el), 0.0])
+    cos_sv = view @ sun
+    r0a = np.full(mu_v.shape, r0)
+    ground = _hits_ground(r0a, mu_v)
+    top = _ray_sphere_far(r0a, mu_v, PLANET_RADIUS_M + ATMOSPHERE_TOP_M)
+    length = np.where(ground, _ray_ground(r0a, mu_v), top)
+    phase_r = _rayleigh_phase(cos_sv)[..., None]
+    phase_m = _mie_phase(cos_sv, atm.mie_asymmetry)[..., None]
+
+    n = _AP_SLICES + 1
+    inscatter = np.zeros(mu_v.shape + (n, 3))
+    multiple = np.zeros(mu_v.shape + (n, 3))
+    transmittance = np.ones(mu_v.shape + (n, 3))
+    luminance = np.zeros(mu_v.shape + (3,))
+    luminance_ms = np.zeros(mu_v.shape + (3,))
+    throughput = np.ones(mu_v.shape + (3,))
+    slices = AERIAL_PERSPECTIVE_MAX_M * (np.arange(n) / _AP_SLICES) ** 2
+    for k in range(_AP_SLICES):
+        for j in range(_AP_SUBSTEPS):
+            a = slices[k] + (slices[k + 1] - slices[k]) * j / _AP_SUBSTEPS
+            b = slices[k] + (slices[k + 1] - slices[k]) * (j + 1) / _AP_SUBSTEPS
+            t0 = np.minimum(a, length)
+            t1 = np.minimum(b, length)
+            dt = t1 - t0
+            t = 0.5 * (t0 + t1)
+            r = np.sqrt(r0 ** 2 + t * t + 2.0 * r0 * mu_v * t)
+            h = r - PLANET_RADIUS_M
+            mu_sun = (r0 * sun[1] + t * cos_sv) / r
+            s_r, s_m, ext = _medium(h, atm)
+            step_t = np.exp(-ext * dt[..., None])
+            t_sun = _lookup_transmittance(trans, h, mu_sun) * _sun_visibility(r, mu_sun)[..., None]
+            psi = _lookup_multiscattering(ms_table, h, mu_sun)
+            weight = throughput * (1.0 - step_t) / np.maximum(ext, 1e-12)
+            luminance += weight * t_sun * (s_r * phase_r + s_m * phase_m)
+            luminance_ms += weight * psi * (s_r + s_m)
+            throughput *= step_t
+        inscatter[:, :, k + 1] = luminance
+        multiple[:, :, k + 1] = luminance_ms
+        transmittance[:, :, k + 1] = throughput
+    for table in (inscatter, multiple, transmittance):
+        table.setflags(write=False)
+    return AerialPerspective(inscatter=inscatter, multiple=multiple, transmittance=transmittance,
+                             horizon_elevation=horizon)

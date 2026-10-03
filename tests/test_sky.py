@@ -341,19 +341,19 @@ def test_a_sunset_does_not_clip_the_way_a_median_meter_made_it():
     above where noon puts them, so the entire solar half of the frame rendered white.
 
     Measured two ways, since WX.3 lit the cloud physically. The bulk of the frame: a sunset's
-    median is no brighter than noon's (0.92 of it; the old dome's sunset, a flat yellow wash, was
-    1.32). And the metered highlights stay inside the meter's headroom (0.9 of it). A cloud face
+    median sits within a stop of the metered highlight. And the metered highlights stay inside
+    the meter's headroom (0.9 of it). A cloud face
     a 4 degree sun lights square-on is far brighter than the ground that sun grazes, so the
     brightest percent of a sunset is brighter than noon's -- as it is in a photograph exposed for
     the ground, which is what the incident meter does by design."""
     from weather_fx.core.sky import DOME_HIGHLIGHT_TARGET, HIGHLIGHT_HEADROOM, dome_exposure
 
-    noon, sunset = _sky_at(12.97, cover=0.35), _sky_at(18.73, cover=0.35, turbidity=3.6)
-    median = []
-    for image in (noon, sunset):
-        median.append(float(np.median(_sky_luminance(image)))
-                      * dome_exposure(image, image.conditions))
-    assert median[1] < 1.3 * median[0]
+    sunset = _sky_at(18.73, cover=0.35, turbidity=3.6)
+    median = float(np.median(_sky_luminance(sunset))) * dome_exposure(sunset, sunset.conditions)
+    # Within a stop of the metered highlight (343 since WX.5's aerial perspective). The old
+    # flat-yellow sunset sat at 552. It used to be measured against noon's median, which aerial
+    # perspective took down to 242 by greying the far clouds, as the air does.
+    assert median < 2.0 * DOME_HIGHLIGHT_TARGET
     metered = float(np.percentile(_sky_luminance(sunset, metered=True), 99.0))
     assert metered * dome_exposure(sunset, sunset.conditions) < (
         HIGHLIGHT_HEADROOM * DOME_HIGHLIGHT_TARGET)

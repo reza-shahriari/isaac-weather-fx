@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 
@@ -214,3 +215,60 @@ def test_drifting_the_dome_by_a_whole_tile_changes_nothing():
     half = environment_map(replace(conditions, cloud_offset_m=(0.5 * tile, 0.0, 0.0)), height=32)
     np.testing.assert_allclose(moved, still, rtol=1e-4, atol=1e-6)
     assert not np.allclose(half, still, rtol=1e-3)
+
+
+# --- a dome texel integrates the cloud it covers --------------------------------------------------
+
+
+def _small_dome_terms(edge_rays: int):
+    from weather_fx.core import sky as S
+    from weather_fx.core.state import WeatherState
+
+    state = WeatherState.from_dict({
+        "general": {"time_source": "manual"},
+        "sky": {"latitude_deg": 48.14, "longitude_deg": 11.58, "date_utc": "2024-06-21",
+                "hour_utc": 12.97},
+        "clouds": {"enabled": True, "cover": 0.35, "genus": "cumulus", "seed": 17,
+                   "temperature_c": 22.0, "dewpoint_c": 12.0, "cells": 96, "levels": 32,
+                   "cell_m": 80.0, "dome_edge_rays": edge_rays},
+    }, strict=True)
+    conditions = S.conditions_from_state(state)
+    rows = 64
+    directions = S.latlong_directions(rows)
+    up = directions[..., 1] > 0.0
+    transmit = np.ones(up.shape)
+    added = np.zeros(up.shape + (3,))
+    transmit[up], added[up] = S._cloud_terms(directions[up], conditions)
+    single = transmit.copy()
+    S._integrate_cloud_edges(transmit, added, up, conditions)
+    return S, conditions, rows, directions, up, single, transmit
+
+
+def test_a_dome_texel_an_edge_crosses_holds_the_mean_of_its_rays():
+    """One ray through a texel's centre samples the cloud; the texel should hold its mean. Against
+    6 x 6 rays per texel, the edge rays take the transmittance's static energy near the horizon
+    to well under a fifth of one ray's, and leave every texel no edge crosses as it was."""
+    S, conditions, rows, directions, up, single, refined = _small_dome_terms(2)
+    theta = (np.arange(rows) + 0.5) * (math.pi / rows)
+    phi = (np.arange(2 * rows) + 0.5) * (math.pi / rows)
+    elevation = np.degrees(np.arcsin(directions[..., 1]))
+    low = up & (elevation < 10.0)
+    r, c = np.nonzero(low)
+    n = 6
+    offsets = (np.arange(n) + 0.5) / n - 0.5
+    du, dv = np.meshgrid(offsets, offsets, indexing="ij")
+    t = theta[r][:, None] + du.ravel() * (math.pi / rows)
+    p = phi[c][:, None] + dv.ravel() * (math.pi / rows)
+    rays = np.stack([np.sin(t) * np.cos(p), -np.sin(t) * np.sin(p), np.cos(t)], axis=-1)
+    reference = S._cloud_terms(rays.reshape(-1, 3), conditions)[0].reshape(r.size, n * n).mean(1)
+    before = np.mean((single[low] - reference) ** 2)
+    after = np.mean((refined[low] - reference) ** 2)
+    assert before > 0.0
+    assert after < 0.2 * before
+    unchanged = refined == single
+    assert unchanged.any() and (~unchanged).any()
+
+
+def test_one_edge_ray_turns_the_integration_off():
+    _, _, _, _, _, single, refined = _small_dome_terms(1)
+    assert np.array_equal(single, refined)

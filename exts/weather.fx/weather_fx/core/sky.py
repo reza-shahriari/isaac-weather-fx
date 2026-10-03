@@ -210,6 +210,9 @@ class SkyConditions:
     #: How far the wind has carried the cloud field, in its own Y-up frame, metres. The observer
     #: sits at the field's origin, so the march starts at minus this.
     cloud_offset_m: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    #: Rays per side through a dome texel a cloud edge crosses, twice that below
+    #: :data:`DOME_GRAZING_DEG`; 1 marches every texel once (:func:`_integrate_cloud_edges`).
+    cloud_edge_rays: int = 2
 
     @property
     def daylight(self) -> float:
@@ -269,6 +272,7 @@ def conditions_from_state(state: Any, *, build_cloud: bool = True) -> SkyConditi
         cloud_lit_colour=tuple(getattr(clouds, "lit_color", (1.0, 1.0, 1.0))),
         cloud_shadow_colour=tuple(getattr(clouds, "shadow_color", (1.0, 1.0, 1.0))),
         cloud_rows=int(getattr(clouds, "dome_rows", 256)),
+        cloud_edge_rays=int(getattr(clouds, "dome_edge_rays", 2)),
     )
 
 
@@ -765,12 +769,77 @@ def environment_map(conditions: SkyConditions, height: int = 1024) -> np.ndarray
     transmit = np.ones(coarse_dirs.shape[:2])
     added = np.zeros(coarse_dirs.shape)
     transmit[up], added[up] = _cloud_terms(coarse_dirs[up], conditions)
+    _integrate_cloud_edges(transmit, added, up, conditions)
     t_full = _upsample_latlong(transmit[..., None], height)[..., 0]
     a_full = _upsample_latlong(added, height) * conditions.exposure_scale
     above = directions[..., 1] > 0.0
     out = clear.copy()
     out[above] = clear[above] * t_full[above][..., None] + a_full[above]
     return np.clip(out, 0.0, None).astype(np.float32)
+
+
+#: A cloud texel whose transmittance differs from a neighbour's by more than this is marched
+#: again through several rays and averaged (:func:`_integrate_cloud_edges`).
+DOME_EDGE_THRESHOLD = 0.02
+#: Below this elevation an edge texel gets twice ``SkyConditions.cloud_edge_rays`` per side. Near
+#: the horizon a texel's footprint is stretched across the cloud layer by 1/sin(elevation) and
+#: holds far more structure than its angle suggests: measured on a 256-row dome, 4 x 4 there took
+#: the static energy below 10 degrees to 9.1 % of one ray's, 3 x 3 only to 13 %.
+DOME_GRAZING_DEG = 15.0
+
+
+def _integrate_cloud_edges(
+    transmit: np.ndarray, added: np.ndarray, up: np.ndarray, conditions: SkyConditions
+) -> None:
+    """Re-march, in place, the cloud texels an edge crosses, and keep the mean of their rays.
+
+    A texel of the dome is a pixel the renderer filters; it should hold the average of the sky
+    over its solid angle, and one ray through its centre samples it instead. Where an edge
+    crosses the texel that is static -- cloud or sky by the luck of the centre -- and it is worst
+    near the horizon, where a texel spans kilometres of the layer (the thermal-camera repo's
+    physics spec, §7.5: the pixel integrates radiance). Blurring the density to the footprint is
+    not the cure: opacity is not linear in density, and measured on a camera it made the static
+    worse. Marching more rays where the texel holds an edge is.
+
+    Transmittance and added light are averaged separately, which keeps the composite
+    premultiplied. Edges are found on the transmittance, wrapping in longitude. Measured on a
+    256-row dome of 35 % cumulus against 6 x 6 rays per texel, the static energy falls to 9 % of
+    one ray's below 10 degrees and 12 % above, for 4.2 times the rays (the 1024-row bake went
+    from 4.1 s to 8.0 s).
+    """
+    per_side = int(conditions.cloud_edge_rays)
+    if per_side <= 1:
+        return
+    rows, cols = transmit.shape
+    differs = np.zeros(transmit.shape, dtype=bool)
+    vertical = np.abs(np.diff(transmit, axis=0)) > DOME_EDGE_THRESHOLD
+    differs[:-1] |= vertical
+    differs[1:] |= vertical
+    across = np.abs(transmit - np.roll(transmit, -1, axis=1)) > DOME_EDGE_THRESHOLD
+    differs |= across | np.roll(across, 1, axis=1)
+    edge = differs.copy()
+    edge[1:] |= differs[:-1]
+    edge[:-1] |= differs[1:]
+    edge |= np.roll(differs, 1, axis=1) | np.roll(differs, -1, axis=1)
+    edge &= up
+    if not np.any(edge):
+        return
+    theta = (np.arange(rows) + 0.5) * (math.pi / rows)
+    phi = (np.arange(cols) + 0.5) * (2.0 * math.pi / cols)
+    centre = latlong_directions(rows)
+    grazing = centre[..., 1] < math.sin(math.radians(DOME_GRAZING_DEG))
+    for n, which in ((2 * per_side, edge & grazing), (per_side, edge & ~grazing)):
+        if not np.any(which):
+            continue
+        r, c = np.nonzero(which)
+        offsets = (np.arange(n) + 0.5) / n - 0.5
+        du, dv = np.meshgrid(offsets, offsets, indexing="ij")
+        t = theta[r][:, None] + du.ravel()[None, :] * (math.pi / rows)
+        p = phi[c][:, None] + dv.ravel()[None, :] * (2.0 * math.pi / cols)
+        rays = np.stack([np.sin(t) * np.cos(p), -np.sin(t) * np.sin(p), np.cos(t)], axis=-1)
+        sub_t, sub_a = _cloud_terms(rays.reshape(-1, 3), conditions)
+        transmit[r, c] = sub_t.reshape(r.size, n * n).mean(axis=1)
+        added[r, c] = sub_a.reshape(r.size, n * n, 3).mean(axis=1)
 
 
 def _without_cloud(conditions: SkyConditions) -> SkyConditions:

@@ -33,7 +33,7 @@ from . import ensure_warp
 
 wp = ensure_warp()
 
-__all__ = ["Camera", "Lighting", "CloudRenderer", "camera_rays"]
+__all__ = ["Camera", "Lighting", "CloudRenderer", "camera_rays", "SkyTables"]
 
 #: Mean radius of the Earth, metres: the cloud shell's curvature.
 PLANET_RADIUS_M = 6_371_000.0
@@ -59,8 +59,13 @@ class Camera:
     azimuth_deg: float
     position_m: Tuple[float, float, float] = (0.0, 2.0, 0.0)
     roll_deg: float = 0.0
+    #: ``(forward, right, up)`` unit vectors that replace the elevation and azimuth: a camera
+    #: posed by a renderer's own matrix.
+    pose: Optional[Tuple[Any, Any, Any]] = None
 
     def basis(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self.pose is not None:
+            return tuple(np.asarray(v, dtype=np.float64) for v in self.pose)  # type: ignore[return-value]
         el, az = math.radians(self.elevation_deg), math.radians(self.azimuth_deg)
         forward = np.array([math.cos(el) * math.sin(az), math.sin(el), -math.cos(el) * math.cos(az)])
         world_up = np.array([0.0, 1.0, 0.0])
@@ -390,6 +395,78 @@ def march_clouds(
         out_dist[j, i] = 0.0
 
 
+@wp.struct
+class Compose:
+    light_azimuth: float
+    air_near_m: float
+    air_log_span: float
+    gains: wp.vec3
+    scale: float
+    flip: int
+
+
+@wp.func
+def row_of_elevation(elevation: float) -> float:
+    """``core.layer_tables.row_of_elevation``: rows packed toward the horizon."""
+    e = elevation / 1.5707963
+    return 0.5 + 0.5 * wp.sign(e) * wp.sqrt(wp.abs(e))
+
+
+@wp.kernel
+def compose_layer(
+    M: March, K: Compose,
+    scattered: wp.array2d(dtype=wp.vec3), trans: wp.array2d(dtype=float), dist: wp.array2d(dtype=float),
+    sky: wp.Texture2D, air_in: wp.Texture3D, air_tr: wp.Texture3D,
+    out: wp.array2d(dtype=wp.vec4),
+):
+    """``sky T + air C + (1 - T) inscatter`` per pixel, white-balanced and scaled, as RGBA."""
+    j, i = wp.tid()
+    px = (float(i) + 0.5 - 0.5 * float(M.width)) / M.focal_px
+    py = (0.5 * float(M.height) - float(j) - 0.5) / M.focal_px
+    d = wp.normalize(M.forward + M.right * px + M.up * py)
+    elevation = wp.asin(wp.clamp(d[1], -1.0, 1.0))
+    azimuth = wp.atan2(d[0], -d[2])
+    v = row_of_elevation(elevation)
+    c4 = wp.texture_sample(sky, wp.vec2f(azimuth / 6.2831853, v), dtype=wp.vec4f)
+    colour = wp.vec3(c4[0], c4[1], c4[2])
+    t = trans[j, i]
+    if t < 0.999:
+        rel = azimuth - K.light_azimuth
+        rel = wp.abs(rel - 6.2831853 * wp.floor((rel + 3.14159265) / 6.2831853))
+        w = wp.log(wp.max(dist[j, i], K.air_near_m) / K.air_near_m) / K.air_log_span
+        uvw = wp.vec3f(rel / 3.14159265, v, wp.clamp(w, 0.0, 1.0))
+        ins4 = wp.texture_sample(air_in, uvw, dtype=wp.vec4f)
+        tr4 = wp.texture_sample(air_tr, uvw, dtype=wp.vec4f)
+        c = scattered[j, i]
+        colour = (colour * t + wp.vec3(c[0] * tr4[0], c[1] * tr4[1], c[2] * tr4[2])
+                  + wp.vec3(ins4[0], ins4[1], ins4[2]) * (1.0 - t))
+    row = j
+    if K.flip != 0:
+        row = M.height - 1 - j
+    out[row, i] = wp.vec4(colour[0] * K.gains[0] * K.scale, colour[1] * K.gains[1] * K.scale,
+                          colour[2] * K.gains[2] * K.scale, 1.0)
+
+
+class SkyTables:
+    """The clear sky and the air in front of the cloud, on the GPU (``core.layer_tables``)."""
+
+    def __init__(self, sky: np.ndarray, air_in: np.ndarray, air_tr: np.ndarray, light_azimuth_rad: float,
+                 air_near_m: float, air_far_m: float, device: str) -> None:
+        clamp = wp.TextureAddressMode.CLAMP
+        wrap = wp.TextureAddressMode.WRAP
+        linear = wp.TextureFilterMode.LINEAR
+        with wp.ScopedDevice(device):
+            self.sky = wp.Texture2D(np.ascontiguousarray(sky, dtype=np.float32), filter_mode=linear,
+                                    address_mode_u=wrap, address_mode_v=clamp)
+            self.air_in = wp.Texture3D(np.ascontiguousarray(air_in, dtype=np.float32),
+                                       filter_mode=linear, address_mode=clamp)
+            self.air_tr = wp.Texture3D(np.ascontiguousarray(air_tr, dtype=np.float32),
+                                       filter_mode=linear, address_mode=clamp)
+        self.light_azimuth_rad = float(light_azimuth_rad)
+        self.air_near_m = float(air_near_m)
+        self.air_log_span = math.log(float(air_far_m) / float(air_near_m))
+
+
 class CloudRenderer:
     """Holds a cloudscape's textures on one GPU and marches cameras through it."""
 
@@ -410,12 +487,46 @@ class CloudRenderer:
         self.layer = Layer()
         for key, value in cloudscape.kernel_constants().items():
             setattr(self.layer, key, value)
+        self._buffers = None
+        self._layer = None
 
     def render(
         self, camera: Camera, lighting: Lighting, *, max_distance_m: float = 80_000.0,
         step_min_m: float = 24.0, step_growth: float = 0.012, max_steps: int = 512,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """``(scattered rgb, transmittance, mean distance)``, each ``(height, width[, 3])``."""
+        rgb, trans, dist, _ = self._march(camera, lighting, max_distance_m, step_min_m, step_growth, max_steps)
+        return rgb.numpy().astype(np.float64), trans.numpy().astype(np.float64), dist.numpy().astype(np.float64)
+
+    def render_layer(
+        self, camera: Camera, lighting: Lighting, tables: SkyTables, *,
+        gains: Tuple[float, float, float] = (1.0, 1.0, 1.0), scale: float = 1.0, flip: bool = False,
+        density_scale: float = 1.0, max_distance_m: float = 80_000.0, step_min_m: float = 24.0,
+        step_growth: float = 0.012, max_steps: int = 512,
+    ):
+        """The finished layer for one camera, left on the GPU: a ``(height, width)`` ``vec4``
+        Warp array of the cloud composed over the clear sky through the air, times ``gains`` and
+        ``scale``. The array is reused between calls of one size; hand it to a texture before
+        the next call."""
+        rgb, trans, dist, m = self._march(camera, lighting, max_distance_m, step_min_m, step_growth,
+                                          max_steps, density_scale)
+        k = Compose()
+        k.light_azimuth = tables.light_azimuth_rad
+        k.air_near_m, k.air_log_span = tables.air_near_m, tables.air_log_span
+        k.gains = wp.vec3(*[float(g) for g in gains])
+        k.scale = float(scale)
+        k.flip = 1 if flip else 0
+        shape = (camera.height, camera.width)
+        with wp.ScopedDevice(self.device):
+            if self._layer is None or self._layer.shape != shape:
+                self._layer = wp.zeros(shape, dtype=wp.vec4)
+            wp.launch(compose_layer, dim=shape,
+                      inputs=[m, k, rgb, trans, dist, tables.sky, tables.air_in, tables.air_tr, self._layer])
+            wp.synchronize_device(self.device)
+        return self._layer
+
+    def _march(self, camera: Camera, lighting: Lighting, max_distance_m: float, step_min_m: float,
+               step_growth: float, max_steps: int, density_scale: float = 1.0):
         forward, right, up = camera.basis()
         m = March()
         m.origin = wp.vec3(*[float(v) for v in camera.position_m])
@@ -430,14 +541,21 @@ class CloudRenderer:
         m.max_distance_m = float(max_distance_m)
         m.step_min_m, m.step_growth, m.max_steps = float(step_min_m), float(step_growth), int(max_steps)
         shape = (camera.height, camera.width)
+        layer = self.layer
+        if density_scale != 1.0:
+            layer = Layer()
+            for key, value in self.cloudscape.kernel_constants().items():
+                setattr(layer, key, value)
+            layer.extinction_per_m = float(self.cloudscape.extinction_per_m * density_scale)
         with wp.ScopedDevice(self.device):
-            rgb = wp.zeros(shape, dtype=wp.vec3)
-            trans = wp.zeros(shape, dtype=float)
-            dist = wp.zeros(shape, dtype=float)
+            if self._buffers is None or self._buffers[0].shape != shape:
+                self._buffers = (wp.zeros(shape, dtype=wp.vec3), wp.zeros(shape, dtype=float),
+                                 wp.zeros(shape, dtype=float))
+            rgb, trans, dist = self._buffers
             wp.launch(march_clouds, dim=shape,
-                      inputs=[m, self.layer, self.weather, self.shape, self.detail, rgb, trans, dist])
+                      inputs=[m, layer, self.weather, self.shape, self.detail, rgb, trans, dist])
             wp.synchronize_device(self.device)
-            return rgb.numpy().astype(np.float64), trans.numpy().astype(np.float64), dist.numpy().astype(np.float64)
+        return rgb, trans, dist, m
 
     def density(self, x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
         """The kernel's density at given points: the test that it is the numpy function."""

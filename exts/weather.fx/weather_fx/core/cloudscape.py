@@ -29,7 +29,8 @@ import numpy as np
 
 from . import clouds as _clouds
 
-__all__ = ["CloudscapeProfile", "CLOUDSCAPE_TYPES", "Cloudscape", "sample_wrapped"]
+__all__ = ["CloudscapeProfile", "CLOUDSCAPE_TYPES", "Cloudscape", "sample_wrapped",
+           "CLOUDSCAPE_SHAPE_KEYS", "cloudscape_from_state", "supports"]
 
 
 @dataclass(frozen=True)
@@ -269,3 +270,55 @@ class Cloudscape:
         for y in self.base_m + (np.arange(20) + 0.5) / 20.0 * self.profile.thickness_m:
             cloudy |= self.density(x, y, z) > 0.5
         return float(cloudy.mean())
+
+
+    def optical_depth_toward(self, origin_m: Any, direction: Any, samples: int = 96) -> float:
+        """Visible optical depth from a point through the layer along a direction (flat slab)."""
+        o = np.asarray(origin_m, dtype=np.float64)
+        d = np.asarray(direction, dtype=np.float64)
+        if self.cover <= 0.0 or abs(d[1]) < 1e-4:
+            return 0.0
+        t0 = (self.base_m - o[1]) / d[1]
+        t1 = (self.top_m - o[1]) / d[1]
+        lo, hi = max(min(t0, t1), 0.0), max(t0, t1)
+        if hi <= lo:
+            return 0.0
+        t = lo + (np.arange(samples) + 0.5) / samples * (hi - lo)
+        p = o[None, :] + t[:, None] * d[None, :]
+        rho = self.density(p[:, 0], p[:, 1], p[:, 2])
+        return float(rho.sum() * (hi - lo) / samples * self.extinction_per_m)
+
+
+#: The cloud parameters a cloudscape's textures depend on.
+CLOUDSCAPE_SHAPE_KEYS = ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "seed")
+
+_CACHE: Dict[Tuple[Any, ...], "Cloudscape"] = {}
+
+
+def supports(genus: str) -> bool:
+    """Whether a genus has a cloudscape profile (cirrus does not yet)."""
+    return genus in CLOUDSCAPE_TYPES
+
+
+def cloudscape_from_state(state: Any, build: bool = True):
+    """The cloudscape a state describes, or ``None`` for a clear sky or an unsupported genus.
+
+    Cached on its shape keys like :func:`~weather_fx.core.clouds.cloud_field_from_state`;
+    ``build=False`` never pays for one.
+    """
+    clouds = state.clouds
+    if not (clouds.enabled and clouds.cover > 0.0 and supports(clouds.genus)):
+        return None
+    key = tuple(getattr(clouds, name) for name in CLOUDSCAPE_SHAPE_KEYS)
+    cached = _CACHE.get(key)
+    if cached is not None or not build:
+        return cached
+    base = clouds.base_m
+    if base <= 0.0:
+        base = _clouds.lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
+    built = Cloudscape(cover=float(clouds.cover), base_m=float(base),
+                       profile=CLOUDSCAPE_TYPES[clouds.genus], seed=int(clouds.seed))
+    while len(_CACHE) >= 2:
+        _CACHE.pop(next(iter(_CACHE)))
+    _CACHE[key] = built
+    return built

@@ -25,6 +25,10 @@ class WeatherContext:
         #: authored. RTX fog colours are in those units too, so a fog that should match the sky
         #: needs this -- a fog colour of about 1 next to a sky of about 150 renders black.
         self.sky_horizon_rgb = None
+        #: The dome's exposure and white-balance gains, ``{"exposure": float, "gains": (r, g, b)}``,
+        #: published by the sky effect after each bake: whatever else draws sky in the frame (the
+        #: per-pixel cloud layer) must be exposed and balanced the same way.
+        self.sky_dome = None
 
     # ---------------------------------------------------------------- stage
     @staticmethod

@@ -199,10 +199,14 @@ class CloudParams:
     """The cloud field. One parameterisation, read by every band that looks up."""
 
     enabled: bool = param(False, "Enabled")
-    render_path: str = param("auto", "Render as", choices=("auto", "volume", "dome"),
-                             tooltip="auto: 3D volumes under the path tracer, painted into the "
-                                     "sky dome under real-time. volume / dome force one. The "
-                                     "cloud field is the same either way.")
+    render_path: str = param("auto", "Render as", choices=("auto", "volume", "dome", "pixel"),
+                             tooltip="pixel: marched per camera pixel on the GPU every frame, in "
+                                     "both render modes (cumulus, congestus, stratocumulus, "
+                                     "stratus). auto: 3D volumes under the path tracer, painted "
+                                     "into the sky dome under real-time. volume / dome force one.")
+    layer_scale: float = param(1.0, "Pixel layer scale", min=0.25, max=1.0, advanced=True,
+                               tooltip="Resolution of the per-pixel cloud layer as a fraction "
+                                       "of the viewport's. Lower is faster and softer.")
     lit_color: Vec3 = param((1.0, 1.0, 1.0), "Lit color", min=0.0, max=1.0, widget="color",
                             tooltip="Colour of the sunlit parts of the cloud. The sun's own tint "
                                     "is applied on top, so sunsets stay orange.")

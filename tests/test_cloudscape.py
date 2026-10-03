@@ -108,3 +108,93 @@ def test_a_white_cloud_under_a_uniform_sky_is_invisible(cumulus: C.Cloudscape) -
     cloudy = transmittance < 0.5
     assert cloudy.mean() > 0.1
     assert np.percentile(np.abs(out[cloudy] / 1000.0 - 1.0), 99) < 0.02
+
+
+# --- the tables the GPU composite samples (core.layer_tables) ------------------------------------
+
+
+def _noon():
+    from weather_fx.core import sky as S
+    from weather_fx.core.state import WeatherState
+
+    state = WeatherState().with_updates("sky", enabled=True, hour_utc=11.0)
+    return S.conditions_from_state(state, build_cloud=False)
+
+
+def test_the_row_packing_inverts_and_puts_the_horizon_in_the_middle() -> None:
+    from weather_fx.core import layer_tables as T
+
+    v = np.linspace(0.0, 1.0, 41)
+    assert np.allclose(T.row_of_elevation(T.elevation_of_row(v)), v)
+    assert T.elevation_of_row(0.5) == pytest.approx(0.0)
+    # Half the rows lie within 22.5 degrees of the horizon.
+    assert np.degrees(T.elevation_of_row(0.75)) == pytest.approx(22.5)
+
+
+def test_the_sky_table_is_the_sky_model_at_its_texel_centres() -> None:
+    from weather_fx.core import layer_tables as T
+    from weather_fx.core import sky as S
+
+    conditions = _noon()
+    table = T.sky_table(conditions, rows=32)
+    assert table.shape == (32, 64, 4) and table.dtype == np.float32
+    j, i = 22, 9
+    el = float(T.elevation_of_row((j + 0.5) / 32))
+    az = (i + 0.5) / 64 * 2.0 * np.pi
+    d = np.array([[np.cos(el) * np.sin(az), np.sin(el), -np.cos(el) * np.cos(az)]])
+    expected = S.sky_radiance_rgb(d, conditions)[0] / conditions.exposure_scale
+    assert np.allclose(table[j, i, :3], expected, rtol=1e-5)
+
+
+def test_the_air_is_clear_up_close_and_the_sky_far_away() -> None:
+    """At the near slice the air transmits nearly everything and adds nearly nothing; at the far
+    one, near the horizon, it has become most of the sky's own light."""
+    from weather_fx.core import layer_tables as T
+
+    conditions = _noon()
+    inscatter, transmittance = T.air_tables(conditions, elevations=16, azimuths=8, distances=8)
+    sky = T.sky_table(conditions, rows=16)
+    low = 9                                   # the second row above the horizon
+    # The nearest slice is 700 m of low air: about a tenth of the light is already lost in blue.
+    assert transmittance[0, low, :, :3].min() > 0.85
+    assert inscatter[0, low, :, 1].max() < 0.15 * sky[low, :, 1].mean()
+    assert transmittance[-1, low, :, 1].max() < 0.5
+    assert inscatter[-1, low, :, 1].mean() > 0.4 * sky[low, :, 1].mean()
+
+
+def test_pixel_is_a_render_path_for_the_genera_it_knows() -> None:
+    from weather_fx.backends.viewport.render_mode import choose_cloud_path
+
+    assert choose_cloud_path("pixel", "RaytracedLighting", "cumulus") == "pixel"
+    assert choose_cloud_path("pixel", "PathTracing", "stratocumulus") == "pixel"
+    # Cirrus has no cloudscape profile yet: it falls back to what "auto" would do.
+    assert choose_cloud_path("pixel", "PathTracing", "cirrus") == "volume"
+    assert choose_cloud_path("pixel", "RaytracedLighting", "cirrus") == "dome"
+
+
+@pytest.mark.skipif(not __import__("weather_fx.gpu", fromlist=["warp_available"]).warp_available(),
+                    reason="no Warp")
+def test_the_gpu_composite_is_the_sky_where_there_is_no_cloud(cumulus: C.Cloudscape) -> None:
+    """A camera looking where the layer is empty gets the sky table back, pixel for pixel, times
+    the gains and the scale -- the composite adds nothing of its own."""
+    from weather_fx.core import layer_tables as T
+    from weather_fx.gpu import cloud_march
+
+    if cloud_march.wp.get_cuda_device_count() == 0:
+        pytest.skip("no CUDA device")
+    conditions = _noon()
+    light = T.lighting_for(conditions)
+    a_in, a_tr = T.air_tables(conditions)
+    tables = cloud_march.SkyTables(T.sky_table(conditions, rows=128), a_in, a_tr, light["azimuth_rad"],
+                                   T.AIR_NEAR_M, T.AIR_FAR_M, "cuda:0")
+    lighting = cloud_march.Lighting(light["sun_direction"], light["sun_rgb"], light["above_rgb"], light["below_rgb"])
+    empty = C.Cloudscape(cover=0.0, base_m=1200.0, profile=C.CLOUDSCAPE_TYPES["cumulus"], seed=1, **SMALL)
+    renderer = cloud_march.CloudRenderer(empty, device="cuda:0")
+    camera = cloud_march.Camera(96, 54, 60.0, 35.0, 20.0)
+    out = renderer.render_layer(camera, lighting, tables, gains=(1.0, 0.5, 2.0), scale=3.0).numpy()
+    d = cloud_march.camera_rays(camera)
+    from weather_fx.core import sky as S
+
+    sky = S.sky_radiance_rgb(d, conditions) / conditions.exposure_scale * np.array([1.0, 0.5, 2.0]) * 3.0
+    assert np.allclose(out[..., :3], sky, rtol=0.03)
+    assert np.all(out[..., 3] == 1.0)

@@ -18,10 +18,20 @@ RENDER_MODE_SETTING = "/rtx/rendermode"
 PATH_TRACED_MODES = frozenset({"PathTracing"})
 
 
-def choose_cloud_path(render_path: str, render_mode: Optional[str]) -> str:
-    """``"volume"`` or ``"dome"`` for a requested path and the renderer's mode string."""
+def choose_cloud_path(render_path: str, render_mode: Optional[str], genus: Optional[str] = None) -> str:
+    """``"volume"``, ``"dome"`` or ``"pixel"`` for a requested path and the renderer's mode string.
+
+    ``"pixel"`` (the cloud marched per camera pixel, ``clouds_pixel.py``) holds in every render
+    mode, but only for a genus the cloudscape has a profile for; any other falls back to
+    ``"auto"``'s choice.
+    """
     if render_path in ("volume", "dome"):
         return render_path
+    if render_path == "pixel":
+        from ...core.cloudscape import supports
+
+        if genus is None or supports(genus):
+            return "pixel"
     return "volume" if render_mode in PATH_TRACED_MODES else "dome"
 
 
@@ -51,7 +61,7 @@ def current_render_mode() -> Optional[str]:
 
 def cloud_path(state) -> str:
     """The path the clouds should take right now for ``state``."""
-    return choose_cloud_path(state.clouds.render_path, current_render_mode())
+    return choose_cloud_path(state.clouds.render_path, current_render_mode(), state.clouds.genus)
 
 
 class RenderModeWatcher:

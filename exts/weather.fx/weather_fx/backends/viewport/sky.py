@@ -187,9 +187,15 @@ class SkyEffect(Effect):
         clouds = state.clouds
         if not (clouds.enabled and clouds.cast_shadow and conditions.sun.is_up):
             return 1.0
-        if cloud_path(state) != "dome":
+        path = cloud_path(state)
+        if path == "pixel":
+            from ...core.cloudscape import cloudscape_from_state
+
+            field = cloudscape_from_state(state, build=False)
+        elif path == "dome":
+            field = cloud_field_from_state(state, build=False)
+        else:
             return 1.0
-        field = cloud_field_from_state(state, build=False)
         if field is None:
             return 1.0
         mpu = self.context.meters_per_unit()
@@ -249,6 +255,8 @@ class SkyEffect(Effect):
         self._gains = result.get("gains", (1.0, 1.0, 1.0))
         self._horizon = result.get("horizon")
         self._publish_horizon()
+        if hasattr(self, "context"):
+            self.context.sky_dome = {"exposure": float(self._exposure), "gains": tuple(self._gains)}
         if previous is not None and previous != self._texture_path:
             # The renderer may still hold the old one; a temp file is the OS's problem after that.
             _unlink(previous)
@@ -296,6 +304,7 @@ class SkyEffect(Effect):
         self._horizon = None
         if hasattr(self, "context"):
             self.context.sky_horizon_rgb = None
+            self.context.sky_dome = None
         self._job.cancel()
         if self._texture_path is not None:
             _unlink(self._texture_path)

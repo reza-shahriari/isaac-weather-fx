@@ -40,7 +40,8 @@ class CloudscapeProfile:
     name: str
     #: Depth of the layer the clouds may occupy, metres.
     thickness_m: float
-    #: Visible extinction of a dense core, per metre. Cumulus measure 0.05-0.12.
+    #: Visible extinction where the cloud holds the most water, at its top, per metre. Cumulus
+    #: measure 0.05-0.12 in their cores; the base holds :attr:`water_base` of it.
     extinction_per_m: float
     #: Fraction of the layer the lowest and the tallest clouds reach (the weather map's type
     #: channel runs between them).
@@ -57,8 +58,16 @@ class CloudscapeProfile:
     shape_tile_m: float
     #: Tile of the detail noise, metres.
     detail_tile_m: float = 520.0
-    #: Gain from eroded shape to density: larger gives a harder, more solid cloud.
-    gain: float = 3.0
+    #: How fast density rises inside the cloud's outline, as ``1 - exp(-edge * depth)``: small is
+    #: a soft, ragged skin (the base and the sides low down), large is a crisp one (the rising
+    #: top). Between them the value follows the height, from ``crisp_from`` to ``crisp_to``.
+    edge_base: float = 2.5
+    edge_top: float = 40.0
+    crisp_from: float = 0.1
+    crisp_to: float = 0.55
+    #: Liquid water at the base as a fraction of the top's. Lifted air condenses more the higher
+    #: it goes (the adiabat), so a cloud is thin and grey at its base and dense at its top.
+    water_base: float = 0.25
     #: The shape noise's lobes and its finer cells, as divisors of the tile.
     lobe_div: float = 4.0
     fine_div: float = 8.0
@@ -66,7 +75,7 @@ class CloudscapeProfile:
 
 CLOUDSCAPE_TYPES: Dict[str, CloudscapeProfile] = {
     "cumulus": CloudscapeProfile(
-        name="cumulus", thickness_m=1600.0, extinction_per_m=0.06, top_min=0.5, top_max=1.0,
+        name="cumulus", thickness_m=1600.0, extinction_per_m=0.12, top_min=0.5, top_max=1.0,
         taper=0.6, spacing_m=2600.0, smallest_m=500.0, erosion=0.5, shape_tile_m=4200.0,
         lobe_div=6.0, fine_div=12.0),
     "congestus": CloudscapeProfile(
@@ -79,6 +88,11 @@ CLOUDSCAPE_TYPES: Dict[str, CloudscapeProfile] = {
         name="stratus", thickness_m=400.0, extinction_per_m=0.03, top_min=0.9, top_max=1.0,
         taper=0.0, spacing_m=6000.0, smallest_m=1500.0, erosion=0.12, shape_tile_m=5000.0),
 }
+
+
+#: Vertical optical depth above which a column counts toward the cover: a seventh of the light
+#: from behind it gets through, and the sky's blue no longer shows.
+CLOUDY_OPTICAL_DEPTH = 2.0
 
 
 def sample_wrapped(texture: np.ndarray, *coords: Any) -> np.ndarray:
@@ -189,27 +203,32 @@ class Cloudscape:
     def _solve_cover(self) -> float:
         """The coverage bias at which the fraction of cloudy columns is the cover asked for.
 
-        A column is cloudy when some level holds density above one half: at these extinctions a
-        cloud a camera cannot see through. Measured on a coarse lattice of columns and solved by
-        bisection, since more coverage can only cover more columns.
+        A column is cloudy when its vertical optical depth passes :data:`CLOUDY_OPTICAL_DEPTH`:
+        a cloud a camera looking up cannot see the sky through. Measured on a coarse lattice of
+        columns and solved by bisection, since more coverage can only cover more columns.
         """
         if self.cover <= 0.0:
             return -1.0
         n = 160
         axis = (np.arange(n) + 0.5) / n * self.weather_tile_m
         x, z = np.meshgrid(axis, axis, indexing="xy")
-        heights = self.base_m + (np.arange(14) + 0.5) / 14.0 * self.profile.thickness_m
         lo, hi = -1.0, 1.0
         for _ in range(14):
             mid = 0.5 * (lo + hi)
-            cloudy = np.zeros(x.shape, dtype=bool)
-            for y in heights:
-                cloudy |= self._density(x, y, z, mid) > 0.5
+            cloudy = self._column_optical_depth(x, z, mid, 14) > CLOUDY_OPTICAL_DEPTH
             if float(cloudy.mean()) < self.cover:
                 lo = mid
             else:
                 hi = mid
         return 0.5 * (lo + hi)
+
+    def _column_optical_depth(self, x: np.ndarray, z: np.ndarray, bias: float, levels: int) -> np.ndarray:
+        """Visible optical depth straight up through the layer, by the midpoint rule."""
+        d = self.profile.thickness_m
+        total = np.zeros(np.shape(x))
+        for y in self.base_m + (np.arange(levels) + 0.5) / levels * d:
+            total += self._density(x, y, z, bias)
+        return total * d / levels * self.profile.extinction_per_m
 
     # --- the function ---------------------------------------------------------------------
 
@@ -249,7 +268,14 @@ class Cloudscape:
         blend = np.clip(hr * 5.0, 0.0, 1.0)
         modifier = detail * (1.0 - blend) + (1.0 - detail) * blend
         eroded = _remap(base, modifier * p.erosion, 1.0)
-        return np.where(inside, np.clip(eroded * p.gain, 0.0, 1.0), 0.0)
+        # The skin: crisp where the cloud is rising, soft at its base and low on its sides.
+        sharp = p.edge_base + (p.edge_top - p.edge_base) * _smoothstep(p.crisp_from, p.crisp_to, hr)
+        edge = 1.0 - np.exp(-sharp * eroded)
+        # The body: liquid water grows with height above the base as the adiabat's does, and
+        # extinction as its two-thirds power (the droplets grow too, their number does not). The
+        # height is the layer's, not the cloud's own: a shallow cloud is a thin one.
+        water = p.water_base + (1.0 - p.water_base) * np.clip(h, 0.0, 1.0) ** (2.0 / 3.0)
+        return np.where(inside, edge * water, 0.0)
 
     def kernel_constants(self) -> Dict[str, float]:
         """Every scalar the GPU kernel needs, by the names its struct uses."""
@@ -259,18 +285,17 @@ class Cloudscape:
             weather_tile_m=float(self.weather_tile_m), shape_tile_m=float(p.shape_tile_m),
             detail_tile_m=float(p.detail_tile_m), coverage_bias=float(self.coverage_bias),
             top_min=float(p.top_min), top_max=float(p.top_max), taper=float(p.taper),
-            erosion=float(p.erosion), gain=float(p.gain),
-            extinction_per_m=float(p.extinction_per_m))
+            erosion=float(p.erosion), edge_base=float(p.edge_base), edge_top=float(p.edge_top),
+            crisp_from=float(p.crisp_from), crisp_to=float(p.crisp_to),
+            water_base=float(p.water_base), extinction_per_m=float(p.extinction_per_m))
 
     def measured_cover(self, columns: int = 256) -> float:
         """Fraction of columns holding cloud a camera cannot see through, on a fresh lattice."""
+        if self.cover <= 0.0:
+            return 0.0
         axis = (np.arange(columns) + 0.25) / columns * self.weather_tile_m
         x, z = np.meshgrid(axis, axis, indexing="xy")
-        cloudy = np.zeros(x.shape, dtype=bool)
-        for y in self.base_m + (np.arange(20) + 0.5) / 20.0 * self.profile.thickness_m:
-            cloudy |= self.density(x, y, z) > 0.5
-        return float(cloudy.mean())
-
+        return float((self._column_optical_depth(x, z, self.coverage_bias, 20) > CLOUDY_OPTICAL_DEPTH).mean())
 
     def optical_depth_toward(self, origin_m: Any, direction: Any, samples: int = 96) -> float:
         """Visible optical depth from a point through the layer along a direction (flat slab)."""

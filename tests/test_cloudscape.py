@@ -33,7 +33,7 @@ def test_the_layer_is_empty_outside_its_base_and_top(cumulus: C.Cloudscape) -> N
     x = np.linspace(-20_000.0, 20_000.0, 300)
     assert not np.any(cumulus.density(x, cumulus.base_m - 1.0, x))
     assert not np.any(cumulus.density(x, cumulus.top_m + 1.0, x))
-    assert np.any(cumulus.density(x, cumulus.base_m + 150.0, x) > 0.5)
+    assert np.any(cumulus.density(x, cumulus.base_m + 150.0, x) > 0.2)
 
 
 def test_the_cover_asked_for_is_the_cover_measured() -> None:
@@ -47,10 +47,64 @@ def test_a_cumulus_has_a_flat_base_and_narrows_toward_its_top(cumulus: C.Cloudsc
     axis = np.linspace(0.0, cumulus.weather_tile_m, 256, endpoint=False)
     x, z = np.meshgrid(axis, axis, indexing="xy")
     d = cumulus.profile.thickness_m
-    area = [float((cumulus.density(x, cumulus.base_m + f * d, z) > 0.5).mean()) for f in (0.02, 0.06, 0.4, 0.8)]
+    area = [float((cumulus.density(x, cumulus.base_m + f * d, z) > 0.05).mean()) for f in (0.02, 0.06, 0.4, 0.8)]
     assert area[1] > 0.8 * max(area)
     assert area[3] < 0.35 * area[1]
     assert area[0] < area[1]
+
+
+def test_the_cloud_is_thin_at_its_base_dense_at_its_top_and_nowhere_clipped_flat(cumulus: C.Cloudscape) -> None:
+    """Liquid water grows with height above the base (extinction as its two-thirds power), so
+    the densest cloud at 40 % of the layer's depth holds 1.7 times the densest at 8 %; and no
+    part of the cloud sits on a ceiling, which is what made the earlier function a uniform solid
+    with a blurred skin."""
+    axis = np.linspace(0.0, cumulus.weather_tile_m, 384, endpoint=False)
+    x, z = np.meshgrid(axis, axis, indexing="xy")
+    p = cumulus.profile
+    d = p.thickness_m
+    low = cumulus.density(x, cumulus.base_m + 0.08 * d, z)
+    high = cumulus.density(x, cumulus.base_m + 0.40 * d, z)
+    water = lambda f: p.water_base + (1.0 - p.water_base) * f ** (2.0 / 3.0)  # noqa: E731
+    assert high.max() == pytest.approx(water(0.40), rel=0.03)   # a crisp top reaches the body's value
+    assert low.max() <= water(0.08) + 1e-9
+    assert low.max() < 0.75 * high.max()
+    cloudy = np.concatenate([low[low > 0.01], high[high > 0.01]])
+    assert cloudy.size > 500
+    assert (cloudy >= 0.999).mean() == 0.0
+    # Graded: the middle half of the cloudy values spans a real range, not one number.
+    q25, q75 = np.percentile(cloudy, [25, 75])
+    assert q75 - q25 > 0.1
+
+
+def _skin_m(layer: C.Cloudscape, fraction: float) -> float:
+    """Median distance, along horizontal lines at one height, from a cloud's outline to where
+    its density reaches half of what the body holds at that height."""
+    p = layer.profile
+    y = layer.base_m + fraction * p.thickness_m
+    step = 2.0
+    x = np.arange(0.0, layer.weather_tile_m, step)
+    widths = []
+    for z in np.linspace(0.0, layer.weather_tile_m, 48, endpoint=False):
+        rho = layer.density(x, y, z)
+        inside = rho > 0.01
+        enters = np.flatnonzero(inside[1:] & ~inside[:-1]) + 1
+        for i in enters:
+            run = rho[i:i + 400]
+            body = run.max()
+            if body < 0.15:
+                continue
+            widths.append(float(np.argmax(run >= 0.5 * body)) * step)
+    assert len(widths) > 20
+    return float(np.median(widths))
+
+
+def test_the_top_is_crisp_and_the_base_is_soft(cumulus: C.Cloudscape) -> None:
+    """A rising cumulus top ends within metres; its base and its lower flanks are ragged. With
+    the test's coarse textures the numbers are loose, the order is not."""
+    high, low = _skin_m(cumulus, 0.40), _skin_m(cumulus, 0.04)
+    print(f"skin: {high:.0f} m at 40 % of the depth, {low:.0f} m at 4 %")
+    assert high < 0.5 * low
+    assert high < 40.0
 
 
 def test_the_layer_wraps_with_the_weather_map(cumulus: C.Cloudscape) -> None:
@@ -85,10 +139,14 @@ def test_the_gpu_kernel_is_the_numpy_function(cumulus: C.Cloudscape) -> None:
     gpu = renderer.density(x, y, z)
     ref = cumulus.density(x, y, z)
     assert (ref > 0.0).mean() > 0.05
-    # CUDA's texture units interpolate with 9-bit fixed-point weights (1/256 of a texel), and the
-    # remaps and the gain of 3 steepen that into a few hundredths at the worst point.
-    assert np.abs(gpu - ref).max() < 0.05
-    assert np.abs(gpu - ref).mean() < 1e-3
+    # CUDA's texture units interpolate with 9-bit fixed-point weights (1/256 of a texel). Where
+    # the skin is crisp the density climbs to the body's value within a few hundredths of the
+    # eroded shape, so at a point on a cloud's top that rounding is a visible fraction of it: the
+    # worst point is loose, the field as a whole is not.
+    error = np.abs(gpu - ref)
+    assert error.max() < 0.25
+    assert np.percentile(error, 99) < 0.02
+    assert error.mean() < 2e-3
 
 
 @pytest.mark.skipif(not __import__("weather_fx.gpu", fromlist=["warp_available"]).warp_available(),

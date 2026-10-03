@@ -44,6 +44,10 @@ BACK_LOBE = 0.15
 ALBEDO = 0.9999
 #: Step inside and just past a cloud, as a fraction of the clear-air step.
 FINE_STEP = 0.3
+#: Longest step inside cloud, in mean free paths of the density at the sample: a crisp cloud top
+#: stops light within ten metres, and a step that long would put the whole pixel's light at one
+#: random depth under the surface (grain). Nor is a step shorter than a pixel's footprint.
+SKIN_STEP = 0.8
 #: Two-stream diffuse transmittance through optical depth tau: ``1 / (1 + 0.75 (1 - g) tau)``.
 DIFFUSE_K = 0.75 * (1.0 - CLOUD_G)
 
@@ -113,7 +117,11 @@ class Layer:
     top_max: float
     taper: float
     erosion: float
-    gain: float
+    edge_base: float
+    edge_top: float
+    crisp_from: float
+    crisp_to: float
+    water_base: float
     extinction_per_m: float
 
 
@@ -177,7 +185,10 @@ def cloud_density(
     blend = wp.clamp(hr * 5.0, 0.0, 1.0)
     modifier = det * (1.0 - blend) + (1.0 - det) * blend
     eroded = remap01(base, modifier * L.erosion, 1.0)
-    return wp.clamp(eroded * L.gain, 0.0, 1.0)
+    sharp = L.edge_base + (L.edge_top - L.edge_base) * smoothstep(L.crisp_from, L.crisp_to, hr)
+    edge = 1.0 - wp.exp(-sharp * eroded)
+    water = L.water_base + (1.0 - L.water_base) * wp.pow(wp.clamp(h, 0.0, 1.0), 2.0 / 3.0)
+    return edge * water
 
 
 @wp.func
@@ -343,25 +354,31 @@ def march_clouds(
         t = t_start + hash01(i, j) * step
         cos_sun = wp.dot(d, M.sun_dir)
         count = int(0)
-        misses = int(8)
+        # Metres marched since the last sample that held cloud; "far" before the first one.
+        clear_m = float(1.0e9)
         while t < t_end and transmittance > 0.004 and count < M.max_steps:
             coarse = wp.max(M.step_min_m, M.step_growth * t)
-            # Coarse steps through clear air; a third of that inside and just past a cloud, so
-            # the edge detail is sampled rather than skipped (the grain of a coarse march).
+            # Coarse steps through clear air. Within one coarse step of a cloud the step is
+            # short enough to find a crisp surface: half a mean free path of the densest cloud,
+            # but no shorter than a pixel's footprint.
+            footprint = wp.max(t / M.focal_px, 1.0)
+            fine = wp.min(coarse, wp.max(wp.min(coarse * FINE_STEP, SKIN_STEP / L.extinction_per_m), footprint))
+            near = clear_m < coarse
             step = coarse
-            if misses < 8:
-                step = coarse * FINE_STEP
+            if near:
+                step = fine
             p = o + d * t
             alt = altitude_of(p)
             dens = cloud_density(p[0], alt, p[2], L, weather, shape, detail)
             if dens > 0.002:
-                if misses >= 8:
+                if not near:
                     # First contact at a coarse step: back up and resample finely from there.
-                    t -= coarse * (1.0 - FINE_STEP)
-                    misses = 0
+                    t -= coarse - fine
+                    clear_m = 0.0
                     continue
-                misses = 0
+                clear_m = 0.0
                 sigma = dens * L.extinction_per_m
+                step = wp.min(coarse, wp.max(wp.min(coarse * FINE_STEP, SKIN_STEP / sigma), footprint))
                 tau_sun = sun_optical_depth(p, M.sun_dir, L, weather, shape, detail)
                 tau_away = sun_optical_depth(p, -M.sun_dir, L, weather, shape, detail)
                 sun = (phase(cos_sun, CLOUD_G) * wp.exp(-tau_sun)
@@ -383,7 +400,7 @@ def march_clouds(
                 weight += transmittance * absorbed
                 transmittance *= 1.0 - absorbed
             else:
-                misses += 1
+                clear_m += step
             t += step
             count += 1
 
@@ -492,7 +509,7 @@ class CloudRenderer:
 
     def render(
         self, camera: Camera, lighting: Lighting, *, max_distance_m: float = 80_000.0,
-        step_min_m: float = 24.0, step_growth: float = 0.012, max_steps: int = 512,
+        step_min_m: float = 24.0, step_growth: float = 0.012, max_steps: int = 768,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """``(scattered rgb, transmittance, mean distance)``, each ``(height, width[, 3])``."""
         rgb, trans, dist, _ = self._march(camera, lighting, max_distance_m, step_min_m, step_growth, max_steps)
@@ -502,7 +519,7 @@ class CloudRenderer:
         self, camera: Camera, lighting: Lighting, tables: SkyTables, *,
         gains: Tuple[float, float, float] = (1.0, 1.0, 1.0), scale: float = 1.0, flip: bool = False,
         density_scale: float = 1.0, max_distance_m: float = 80_000.0, step_min_m: float = 24.0,
-        step_growth: float = 0.012, max_steps: int = 512,
+        step_growth: float = 0.012, max_steps: int = 768,
     ):
         """The finished layer for one camera, left on the GPU: a ``(height, width)`` ``vec4``
         Warp array of the cloud composed over the clear sky through the air, times ``gains`` and

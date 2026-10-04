@@ -235,7 +235,7 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, er
     f = EROSION_TILE_M / 4.0
     e2 = wp.texture_sample(detail, wp.vec3f(x / f + 0.37, y / f + 0.11, z / f + 0.73), dtype=float)
     noise = 0.65 * e1 + 0.35 * e2
-    strength = L.patch_erosion * (1.0 - 0.55 * wp.clamp(v * 1.4, 0.0, 1.0))
+    strength = L.patch_erosion * (1.0 - 0.55 * wp.clamp(v * 1.4, 0.0, 1.0)) * (0.3 + 0.7 * smoothstep(0.0, 0.1, v))
     return remap01(d, noise * strength, 1.0)
 
 

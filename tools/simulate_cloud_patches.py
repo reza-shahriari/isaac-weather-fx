@@ -38,6 +38,8 @@ except ImportError:
 UNIT_M = 100.0
 #: Fraction of the cloud's height, from the ground, that is below the condensation level.
 CONDENSATION = 0.3
+#: A patch's base is the lowest level where its cloud covers this share of its widest level.
+BASE_AREA = 0.9
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -164,6 +166,32 @@ def round_off(values: np.ndarray, seed: int) -> np.ndarray:
     return out * peak
 
 
+def flat_base(values: np.ndarray) -> np.ndarray:
+    """Cut the patch where its cloud is first wide, so it stands on a flat base.
+
+    The solver's smoke rises as stems under heads, and a cut low in the stems leaves clouds
+    with narrow round bottoms. A cumulus is the part of a thermal above its condensation level,
+    which is one height for the whole field: the cut goes at the lowest level where the cloud
+    covers ``BASE_AREA`` of the widest it gets, and everything under it is dropped.
+    """
+    solid = values > 0.15 * values.max()
+    area = solid.sum(axis=(0, 2)).astype(np.float64)
+    level = int(np.argmax(area >= BASE_AREA * area.max()))
+    return values[:, level:, :]
+
+
+def trim(values: np.ndarray) -> np.ndarray:
+    """What holds cloud, with a two-cell empty margin at the sides and the top."""
+    solid = values > 0.004 * values.max()
+    keep = []
+    for axis in range(3):
+        other = tuple(k for k in range(3) if k != axis)
+        idx = np.flatnonzero(solid.any(axis=other))
+        lo = 0 if axis == 1 else max(int(idx.min()) - 2, 0)
+        keep.append(slice(lo, min(int(idx.max()) + 3, values.shape[axis])))
+    return values[tuple(keep)]
+
+
 def convert(cache: str, name: str) -> None:
     path = os.path.join(cache, "data", f"fluid_data_{a.frame:04d}.vdb")
     grid = openvdb.read(path, "density")
@@ -173,15 +201,7 @@ def convert(cache: str, name: str) -> None:
     voxel_m = float(grid.transform.voxelSize()[0]) * UNIT_M
     values = np.ascontiguousarray(values.transpose(0, 2, 1))            # Blender is Z up
     values = values[:, int(CONDENSATION * values.shape[1]):, :]
-    # Trim to what holds cloud, with a two-cell empty margin.
-    solid = values > 0.004 * values.max()
-    keep = []
-    for axis in range(3):
-        other = tuple(k for k in range(3) if k != axis)
-        idx = np.flatnonzero(solid.any(axis=other))
-        lo = 0 if axis == 1 else max(int(idx.min()) - 2, 0)
-        keep.append(slice(lo, min(int(idx.max()) + 3, values.shape[axis])))
-    values = values[tuple(keep)]
+    values = trim(flat_base(values))
     values = round_off(values, a.seed)
     density = np.round(255.0 * np.clip(values / values.max(), 0.0, 1.0)).astype(np.uint8)
     os.makedirs(a.out, exist_ok=True)

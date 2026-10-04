@@ -451,7 +451,7 @@ class Cloudscape:
         f = t / 4.0
         e2 = sample_wrapped(self.detail, x / f + 0.37, y / f + 0.11, z / f + 0.73)
         noise = 0.65 * e1 + 0.35 * e2
-        strength = p.patch_erosion * (1.0 - 0.55 * np.clip(v * 1.4, 0.0, 1.0))
+        strength = p.patch_erosion * (1.0 - 0.55 * np.clip(v * 1.4, 0.0, 1.0)) * (0.3 + 0.7 * _smoothstep(0.0, 0.1, v))
         eroded = _remap(d, noise * strength, 1.0) if p.patch_erosion > 0.0 else d
         return np.where(inside & (d > 0.0), eroded, 0.0)
 

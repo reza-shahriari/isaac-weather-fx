@@ -212,6 +212,10 @@ class CloudParams:
     layer_scale: float = param(0.75, "Pixel layer scale", min=0.25, max=1.0, advanced=True,
                                tooltip="Resolution of the per-pixel cloud layer as a fraction "
                                        "of the viewport's. Lower is faster and softer.")
+    veil_scene: bool = param(True, "Cloud in front of objects", advanced=True,
+                             tooltip="Per-pixel layer: read the scene's depth and draw the cloud "
+                                     "that lies in front of an object over it, so an object inside "
+                                     "or behind a cloud is hidden by it.")
     lit_color: Vec3 = param((1.0, 1.0, 1.0), "Lit color", min=0.0, max=1.0, widget="color",
                             tooltip="Colour of the sunlit parts of the cloud. The sun's own tint "
                                     "is applied on top, so sunsets stay orange.")

@@ -47,6 +47,9 @@ parser.add_argument("--rt-subframes", type=int, default=8)
 parser.add_argument("--pt-subframes", type=int, default=48)
 parser.add_argument("--skip-path-traced", action="store_true")
 parser.add_argument("--skip-timing", action="store_true")
+parser.add_argument("--targets", action="store_true",
+                    help="red balls in the az180 view: a grid behind the cloud layer and two in front of it")
+parser.add_argument("--no-veil", action="store_true", help="do not draw the cloud over scene objects")
 parser.add_argument("--pan", type=int, default=0, help="frames of a full turn in Real-Time, as pan.mp4 (0: skip)")
 args, _ = parser.parse_known_args()
 
@@ -90,6 +93,18 @@ try:
 except Exception as exc:  # the layer falls back to general.follow_prim
     print(f"[look] no viewport to aim ({exc!r})")
 
+if args.targets:
+    # A grid of balls 10 km away, above the layer's top: each is behind whatever cloud is on its
+    # ray, so some show whole in a gap, some are half hidden and some are gone. Two more stand
+    # 1.5 km away, under the base, in front of every cloud.
+    spots = [(180.0 + 10.0 * a, 12.0 + 8.0 * t, 10000.0) for a in range(-3, 4) for t in range(4)]
+    spots += [(165.0, 30.0, 1500.0), (195.0, 30.0, 1500.0)]
+    for index, (azimuth, tilt, distance) in enumerate(spots):
+        ball = UsdGeom.Sphere.Define(stage, f"/World/Targets/Ball{index}")
+        ball.CreateRadiusAttr(0.025 * distance)
+        UsdGeom.Xformable(ball).AddTranslateOp().Set(Gf.Vec3d(*EYE_M) + distance * _direction(azimuth, tilt))
+        ball.CreateDisplayColorAttr([Gf.Vec3f(0.8, 0.08, 0.05)])
+
 product = rep.create.render_product(SKY_CAMERA, tuple(args.resolution))
 rgb = rep.AnnotatorRegistry.get_annotator("rgb")
 rgb.attach(product)
@@ -103,7 +118,7 @@ wx.set_time(date_utc="2024-06-21")
 wx.configure(sky={"enabled": True, "hour_utc": VIEWS[0][1]},
              clouds={"enabled": True, "render_path": "pixel", "cover": args.cover,
                      "genus": args.genus, "seed": args.seed, "patches": args.patches,
-                     "layer_scale": args.layer_scale})
+                     "layer_scale": args.layer_scale, "veil_scene": not args.no_veil})
 
 camera = UsdGeom.Camera(stage.GetPrimAtPath(SKY_CAMERA))
 

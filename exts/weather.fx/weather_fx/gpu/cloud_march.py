@@ -156,6 +156,11 @@ class March:
     step_growth: float
     max_steps: int
     frame: int
+    #: Scene depth: 1 if ``march_clouds`` is given the distance to the nearest surface per pixel,
+    #: metres per unit of that distance, and the distance past which a pixel holds no surface.
+    depth_on: int
+    depth_scale: float
+    depth_max_m: float
 
 
 @wp.func
@@ -172,6 +177,10 @@ def remap01(v: float, lo: float, hi: float) -> float:
 #: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
 EROSION_TILE_M = 230.0
 PATCH_FOOTPRINT = 0.9
+#: A veil is never fully opaque: the renderer then keeps reporting the depth of what is behind.
+VEIL_OPACITY_MAX = 0.995
+#: The opacity over some surface from which a frame gets a veil.
+VEIL_NEEDED = 0.004
 SMALL_PERIOD = 0.4
 SMALL_COVER = 1.5
 SMALL_KEEP = 0.45
@@ -453,6 +462,7 @@ def march_clouds(
     M: March, L: Layer,
     weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D,
     out_rgb: wp.array2d(dtype=wp.vec3), out_t: wp.array2d(dtype=float), out_dist: wp.array2d(dtype=float),
+    depth: wp.array2d(dtype=float), out_veil: wp.array2d(dtype=wp.vec4),
 ):
     j, i = wp.tid()
     px = (float(i) + 0.5 - 0.5 * float(M.width)) / M.focal_px
@@ -462,6 +472,17 @@ def march_clouds(
 
     scattered = wp.vec3(0.0, 0.0, 0.0)
     transmittance = float(1.0)
+    # Where the scene has a surface on this ray, the cloud in front of it is kept apart (the
+    # veil): its light, and how much of the surface it hides.
+    stop = float(1.0e30)
+    if M.depth_on != 0:
+        dj = wp.min(int((float(j) + 0.5) / float(M.height) * float(depth.shape[0])), depth.shape[0] - 1)
+        di = wp.min(int((float(i) + 0.5) / float(M.width) * float(depth.shape[1])), depth.shape[1] - 1)
+        surface = depth[dj, di] * M.depth_scale
+        if surface > 0.0 and surface < M.depth_max_m:
+            stop = surface
+    veil = wp.vec4(0.0, 0.0, 0.0, 0.0)
+    veiled = int(0)
     weighted_t = float(0.0)
     weight = float(0.0)
 
@@ -510,6 +531,9 @@ def march_clouds(
             step = coarse
             if near:
                 step = fine
+            if veiled == 0 and t >= stop:
+                veil = wp.vec4(scattered[0], scattered[1], scattered[2], 1.0 - transmittance)
+                veiled = 1
             p = o + d * t
             alt = altitude_of(p)
             dens = cloud_density(p[0], alt, p[2], L, weather, shape, detail, patches)
@@ -551,6 +575,13 @@ def march_clouds(
             t += step
             count += 1
 
+    if veiled == 0:
+        # The march ended before the surface: all the cloud on this ray is in front of it. A
+        # ray with no surface is marked by a negative opacity.
+        veil = wp.vec4(scattered[0], scattered[1], scattered[2], 1.0 - transmittance)
+        if stop > 1.0e29:
+            veil = wp.vec4(scattered[0], scattered[1], scattered[2], transmittance - 1.0 - 1.0e-6)
+    out_veil[j, i] = veil
     out_rgb[j, i] = scattered
     out_t[j, i] = transmittance
     if weight > 0.0:
@@ -685,6 +716,57 @@ def compose_layer(
                           colour[2] * K.gains[2] * K.scale, 1.0)
 
 
+@wp.kernel
+def compose_veil(
+    M: March, K: Compose, veil: wp.array2d(dtype=wp.vec4),
+    scattered: wp.array2d(dtype=wp.vec3), trans: wp.array2d(dtype=float), dist: wp.array2d(dtype=float),
+    air_in: wp.Texture3D, air_tr: wp.Texture3D, layer: wp.array2d(dtype=wp.vec4),
+    out: wp.array2d(dtype=wp.vec4), out_opacity: wp.array2d(dtype=wp.vec4), most: wp.array(dtype=float),
+):
+    """The veil as two textures: its opacity ``a`` as a grey, and the colour it must emit so
+    that what is seen is the cloud in front of a surface plus ``1 - a`` of the surface.
+
+    The colour is the finished layer's own cloud colour at that pixel wherever the layer holds
+    enough cloud to tell (the same air, the same mean over frames), so a surface wholly hidden
+    looks exactly like the cloud beside it. Where a ray meets no surface the veil shows the
+    layer itself at the cloud's opacity, which changes nothing there and keeps the veil smooth
+    across the outline of an object. ``most`` receives the largest opacity over a surface: a
+    frame in which no surface has cloud in front of it needs no veil at all."""
+    j, i = wp.tid()
+    v = veil[j, i]
+    row = j
+    if K.flip != 0:
+        row = M.height - 1 - j
+    finished = layer[row, i]
+    a = v[3]
+    colour = wp.vec3(finished[0], finished[1], finished[2])
+    if a >= 0.0:
+        wp.atomic_max(most, 0, a)
+        px = (float(i) + 0.5 - 0.5 * float(M.width)) / M.focal_px
+        py = (0.5 * float(M.height) - float(j) - 0.5) / M.focal_px
+        d = wp.normalize(M.forward + M.right * px + M.up * py)
+        azimuth = wp.atan2(d[0], -d[2])
+        rel = azimuth - K.light_azimuth
+        rel = wp.abs(rel - 6.2831853 * wp.floor((rel + 3.14159265) / 6.2831853))
+        w = wp.log(wp.max(dist[j, i], K.air_near_m) / K.air_near_m) / K.air_log_span
+        uvw = wp.vec3f(rel / 3.14159265, row_of_elevation(wp.asin(wp.clamp(d[1], -1.0, 1.0))), wp.clamp(w, 0.0, 1.0))
+        ins4 = wp.texture_sample(air_in, uvw, dtype=wp.vec4f)
+        tr4 = wp.texture_sample(air_tr, uvw, dtype=wp.vec4f)
+        ins = wp.vec3(ins4[0], ins4[1], ins4[2])
+        cover = 1.0 - trans[j, i]
+        c = scattered[j, i]
+        share = cover
+        if cover < 0.05:
+            # Too little cloud in the mean over frames to take a colour from: this frame's own.
+            c = wp.vec3(v[0], v[1], v[2])
+            share = wp.max(a, 1.0e-4)
+        colour = (wp.vec3(c[0] * tr4[0], c[1] * tr4[1], c[2] * tr4[2]) / share + ins)
+        colour = wp.vec3(colour[0] * K.gains[0], colour[1] * K.gains[1], colour[2] * K.gains[2]) * K.scale
+    a = wp.clamp(wp.abs(a), 0.0, VEIL_OPACITY_MAX)
+    out[row, i] = wp.vec4(colour[0], colour[1], colour[2], 1.0)
+    out_opacity[row, i] = wp.vec4(a, a, a, 1.0)
+
+
 class SkyTables:
     """The clear sky and the air in front of the cloud, on the GPU (``core.layer_tables``)."""
 
@@ -738,6 +820,11 @@ class CloudRenderer:
                                         address_mode=wp.TextureAddressMode.CLAMP)
         self._buffers = None
         self._layer = None
+        self._veil = None
+        self._veil_raw = None
+        #: After ``render_layer(depth=...)``: the veil's ``(emission, opacity)`` arrays, or None.
+        self.veil = None
+        self._no_depth = None
         self._frame = 0
         self._history = None      # two sets of (rgb, transmittance, distance, count)
         self._history_key = None  # what the history was accumulated under
@@ -756,14 +843,21 @@ class CloudRenderer:
         gains: Tuple[float, float, float] = (1.0, 1.0, 1.0), scale: float = 1.0, flip: bool = False,
         density_scale: float = 1.0, max_distance_m: float = 80_000.0, step_min_m: float = 24.0,
         step_growth: float = 0.012, max_steps: int = 768, accumulate_frames: int = 16,
+        depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9,
     ):
         """The finished layer for one camera, left on the GPU: a ``(height, width)`` ``vec4``
         Warp array of the cloud composed over the clear sky through the air, times ``gains`` and
         ``scale``. The array is reused between calls of one size; hand it to a texture before
-        the next call."""
+        the next call.
+
+        With ``depth`` (a Warp ``float`` array on this device of any size covering the same view:
+        distance from the camera to the nearest surface, ``depth_scale`` metres per unit, no
+        surface past ``depth_max_m``), :attr:`veil` afterwards holds the cloud in front of the
+        scene's surfaces as ``(emission, opacity)``, for a quad drawn in front of them."""
         self._frame += 1
         rgb, trans, dist, m = self._march(camera, lighting, max_distance_m, step_min_m, step_growth,
-                                          max_steps, density_scale, frame=self._frame)
+                                          max_steps, density_scale, frame=self._frame,
+                                          depth=depth, depth_scale=depth_scale, depth_max_m=depth_max_m)
         if accumulate_frames > 1:
             rgb, trans, dist = self._accumulate(camera, lighting, m, rgb, trans, dist,
                                                 density_scale, accumulate_frames)
@@ -779,6 +873,16 @@ class CloudRenderer:
                 self._layer = wp.zeros(shape, dtype=wp.vec4)
             wp.launch(compose_layer, dim=shape,
                       inputs=[m, k, rgb, trans, dist, tables.sky, tables.air_in, tables.air_tr, self._layer])
+            self.veil = None
+            if depth is not None:
+                if self._veil is None or self._veil[0].shape != shape:
+                    self._veil = (wp.zeros(shape, dtype=wp.vec4), wp.zeros(shape, dtype=wp.vec4))
+                most = wp.zeros(1, dtype=float)
+                wp.launch(compose_veil, dim=shape,
+                          inputs=[m, k, self._veil_raw, rgb, trans, dist, tables.air_in, tables.air_tr,
+                                  self._layer, self._veil[0], self._veil[1], most])
+                if float(most.numpy()[0]) > VEIL_NEEDED:
+                    self.veil = self._veil
             wp.synchronize_device(self.device)
         return self._layer
 
@@ -817,7 +921,8 @@ class CloudRenderer:
         return new[0], new[1], new[2]
 
     def _march(self, camera: Camera, lighting: Lighting, max_distance_m: float, step_min_m: float,
-               step_growth: float, max_steps: int, density_scale: float = 1.0, frame: int = 0):
+               step_growth: float, max_steps: int, density_scale: float = 1.0, frame: int = 0,
+               depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9):
         forward, right, up = camera.basis()
         m = March()
         m.origin = wp.vec3(*[float(v) for v in camera.position_m])
@@ -832,6 +937,8 @@ class CloudRenderer:
         m.max_distance_m = float(max_distance_m)
         m.step_min_m, m.step_growth, m.max_steps = float(step_min_m), float(step_growth), int(max_steps)
         m.frame = int(frame)
+        m.depth_on = 0 if depth is None else 1
+        m.depth_scale, m.depth_max_m = float(depth_scale), float(depth_max_m)
         shape = (camera.height, camera.width)
         layer = self.layer
         if density_scale != 1.0:
@@ -843,8 +950,13 @@ class CloudRenderer:
                 self._buffers = (wp.zeros(shape, dtype=wp.vec3), wp.zeros(shape, dtype=float),
                                  wp.zeros(shape, dtype=float))
             rgb, trans, dist = self._buffers
+            if self._veil_raw is None or self._veil_raw.shape != shape:
+                self._veil_raw = wp.zeros(shape, dtype=wp.vec4)
+            if self._no_depth is None:
+                self._no_depth = wp.zeros((1, 1), dtype=float)
             wp.launch(march_clouds, dim=shape,
-                      inputs=[m, layer, self.weather, self.shape, self.detail, self.patches, rgb, trans, dist])
+                      inputs=[m, layer, self.weather, self.shape, self.detail, self.patches, rgb, trans, dist,
+                              self._no_depth if depth is None else depth, self._veil_raw])
             wp.synchronize_device(self.device)
         return rgb, trans, dist, m
 

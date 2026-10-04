@@ -124,3 +124,45 @@ def test_the_gpu_kernel_places_the_patches_the_numpy_reference_does(sky: C.Cloud
     error = np.abs(gpu - ref)
     assert error.max() < 0.05
     assert error.mean() < 1e-3
+
+
+@pytest.mark.skipif(not __import__("weather_fx.gpu", fromlist=["warp_available"]).warp_available(),
+                    reason="no Warp")
+def test_the_veil_is_the_cloud_in_front_of_a_surface() -> None:
+    """With the scene's depth, the march keeps the cloud in front of each surface apart. A wall
+    in front of the layer is veiled by nothing; a wall behind it is veiled exactly as much as
+    the whole cloud is opaque; and a frame whose surfaces have no cloud before them has no veil."""
+    from weather_fx.core import layer_tables as T
+    from weather_fx.core import sky as S
+    from weather_fx.core.state import WeatherState
+    from weather_fx.gpu import cloud_march
+
+    wp = cloud_march.wp
+    if wp.get_cuda_device_count() == 0:
+        pytest.skip("no CUDA device")
+    conditions = S.conditions_from_state(WeatherState().with_updates("sky", enabled=True, hour_utc=11.0),
+                                         build_cloud=False)
+    light = T.lighting_for(conditions)
+    a_in, a_tr = T.air_tables(conditions)
+    tables = cloud_march.SkyTables(T.sky_table(conditions, rows=128), a_in, a_tr, light["azimuth_rad"],
+                                   T.AIR_NEAR_M, T.AIR_FAR_M, "cuda:0")
+    lighting = cloud_march.Lighting(light["sun_direction"], light["sun_rgb"], light["above_rgb"], light["below_rgb"])
+    layer = C.Cloudscape(cover=0.5, base_m=1200.0, profile=C.CLOUDSCAPE_TYPES["cumulus"], seed=4,
+                         patches=C.load_patches(), **SMALL)
+    renderer = cloud_march.CloudRenderer(layer, device="cuda:0")
+    camera = cloud_march.Camera(160, 90, 60.0, 0.0, 35.0)
+
+    def veil_for(distance_m: float):
+        depth = wp.array(np.full((90, 160), distance_m, dtype=np.float32), dtype=float, device="cuda:0")
+        renderer.reset_history()
+        renderer.render_layer(camera, lighting, tables, depth=depth, accumulate_frames=1)
+        return renderer.veil
+
+    assert veil_for(300.0) is None                      # a wall under the base: nothing in front of it
+    behind = veil_for(1.0e6)
+    assert behind is not None
+    opacity = behind[1].numpy()[..., 0]
+    transmittance = renderer._buffers[1].numpy()        # of the same march
+    cloudy = transmittance < 0.5
+    assert cloudy.mean() > 0.05
+    assert np.allclose(opacity, np.minimum(1.0 - transmittance, 0.995), atol=1e-5)

@@ -48,6 +48,12 @@ TEXTURE_NAME = "weather_fx_cloud_layer"
 EMISSIVE_PER_DOME = math.pi
 #: Where the quad sits, as a fraction of the camera's far clipping distance.
 QUAD_DEPTH = 0.9
+VEIL_PATH = LAYER_ROOT + "/Veil"
+VEIL_MATERIAL_PATH = LAYER_ROOT + "/VeilMaterial"
+VEIL_TEXTURE_NAME = "weather_fx_cloud_veil"
+VEIL_OPACITY_TEXTURE_NAME = "weather_fx_cloud_veil_opacity"
+#: Where the veil sits in front of the camera, metres (and never inside the near clip).
+VEIL_DEPTH_M = 0.5
 #: The sun's movement, degrees, after which the sky and air tables are rebuilt.
 TABLE_STEP_DEG = 0.25
 
@@ -70,6 +76,11 @@ class CloudLayerEffect(Effect):
         self._frame_ms = 0.0
         self._size = (0, 0)
         self._failed = False
+        self._depth = None
+        self._veil_providers = None
+        self._veil_key = None
+        self._veil_visible = False
+        self._veil_failed = False
 
     # --- lifecycle ---------------------------------------------------------------------
 
@@ -120,11 +131,14 @@ class CloudLayerEffect(Effect):
         self._renderer_key = None
         self._tables = None
         self._provider = None
+        self._veil_providers = None
+        self._drop_depth()
 
     def stats(self) -> dict:
         return {"active": self._authored, "frame_ms": round(self._frame_ms, 2),
                 "resolution": list(self._size), "building": self._job.busy,
-                "ready": self._renderer is not None, "failed": self._failed}
+                "ready": self._renderer is not None, "failed": self._failed,
+                "veil": self._veil_visible}
 
     # --- the cloud and its tables --------------------------------------------------------
 
@@ -181,6 +195,68 @@ class CloudLayerEffect(Effect):
         prim = stage.GetPrimAtPath(path)
         return (prim if prim and prim.GetTypeName() == "Camera" else None), size
 
+    # --- the scene's depth, for the cloud in front of objects ----------------------------------
+
+    def _drop_depth(self) -> None:
+        for annotator in (self._depth or {}).values():
+            try:
+                annotator.detach()
+            except Exception:
+                pass
+        self._depth = None
+
+    def _scene_depth(self, state: Any, stage: Any, camera_path: str):
+        """Distance from the camera to the nearest surface per pixel, as a Warp array on the
+        renderer's GPU, from the frame before; None when it is not to be had (nothing renders
+        this camera, no replicator, the first frame). It is read from whichever render product
+        of this camera delivers one: the viewport's, or one a script made. The veil quad is not
+        in it: a surface that is partly see-through leaves no depth."""
+        if self._veil_failed or not bool(getattr(state.clouds, "veil_scene", True)):
+            self._drop_depth()
+            return None
+        try:
+            import omni.replicator.core as rep
+
+            products = []
+            try:
+                from omni.kit.viewport.utility import get_active_viewport
+
+                viewport = get_active_viewport()
+                if viewport is not None and str(viewport.camera_path) == camera_path:
+                    products.append(str(viewport.render_product_path))
+            except Exception:
+                pass
+            render = stage.GetPrimAtPath("/Render")
+            if render:
+                from pxr import Usd
+
+                for prim in Usd.PrimRange(render):
+                    if prim.GetTypeName() == "RenderProduct" and str(prim.GetPath()) not in products:
+                        targets = prim.GetRelationship("camera").GetTargets()
+                        if targets and str(targets[0]) == camera_path:
+                            products.append(str(prim.GetPath()))
+            if self._depth is None:
+                self._depth = {}
+            for product in [p for p in self._depth if p not in products]:
+                self._depth.pop(product).detach()
+            found = None
+            for product in products:
+                annotator = self._depth.get(product)
+                if annotator is None:
+                    annotator = rep.AnnotatorRegistry.get_annotator("distance_to_camera", device="cuda")
+                    annotator.attach([product])
+                    self._depth[product] = annotator
+                    continue
+                data = annotator.get_data()
+                if found is None and data is not None and len(getattr(data, "shape", ())) == 2 and data.shape[0] >= 8:
+                    found = data
+            return found
+        except Exception:
+            log.exception("weather_fx: no scene depth; the cloud will not be drawn over objects")
+            self._veil_failed = True
+            self._drop_depth()
+            return None
+
     def _draw(self, state: Any) -> None:
         from pxr import Gf, Usd, UsdGeom
 
@@ -217,9 +293,12 @@ class CloudLayerEffect(Effect):
                                   pose=(direction(0, 0, -1), direction(1, 0, 0), direction(0, 1, 0)))
         dome = getattr(self.context, "sky_dome", None) or {}
         gains = tuple(dome.get("gains", (1.0, 1.0, 1.0)))
+        depth = self._scene_depth(state, stage, str(prim.GetPath()))
         layer = self._renderer.render_layer(
             view, self._lighting, self._tables, gains=gains, flip=False,
-            density_scale=float(state.clouds.density_scale))
+            density_scale=float(state.clouds.density_scale),
+            depth=depth, depth_scale=mpu, depth_max_m=0.8 * QUAD_DEPTH * float(clip[1]) * mpu)
+        veil = self._renderer.veil
 
         import omni.ui as ui
 
@@ -230,6 +309,14 @@ class CloudLayerEffect(Effect):
         intensity = (EMISSIVE_PER_DOME * float(dome.get("exposure", 1.0))
                      * float(state.sky.exposure_scale))
         self._author(stage, world, focal, aperture, float(clip[1]), width / height, intensity)
+        if veil is not None:
+            if self._veil_providers is None:
+                self._veil_providers = (ui.DynamicTextureProvider(VEIL_TEXTURE_NAME),
+                                        ui.DynamicTextureProvider(VEIL_OPACITY_TEXTURE_NAME))
+            for provider, array in zip(self._veil_providers, veil):
+                provider.set_bytes_data_from_gpu(array.ptr, [width, height], format=ui.TextureFormat.RGBA32_SFLOAT)
+        self._author_veil(stage, world, focal, aperture, max(VEIL_DEPTH_M / mpu, 2.0 * float(clip[0])),
+                          width / height, intensity, veil is not None)
         self._size = (width, height)
         self._frame_ms = (time.perf_counter() - start) * 1000.0
 
@@ -287,11 +374,80 @@ class CloudLayerEffect(Effect):
                 shader.GetInput("emissive_intensity").Set(float(intensity))
                 self._intensity = float(intensity)
 
+    def _author_veil(self, stage: Any, world: Any, focal: float, aperture: float, depth: float,
+                     aspect: float, intensity: float, show: bool) -> None:
+        """The veil: a quad just in front of the camera that emits the cloud lying in front of
+        the scene's surfaces and is as opaque as that cloud, so the renderer itself blends it
+        over them, the same in both render modes."""
+        from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            prim = stage.GetPrimAtPath(VEIL_PATH)
+            if not prim:
+                if not show:
+                    return
+                quad = UsdGeom.Mesh.Define(stage, VEIL_PATH)
+                quad.CreateFaceVertexCountsAttr([4])
+                quad.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+                quad.CreateDoubleSidedAttr(True)
+                UsdGeom.PrimvarsAPI(quad.GetPrim()).CreatePrimvar(
+                    "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.varying
+                ).Set([(0, 0), (1, 0), (1, 1), (0, 1)])
+                for name in ("primvars:doNotCastShadows", "primvars:invisibleToSecondaryRays"):
+                    quad.GetPrim().CreateAttribute(name, Sdf.ValueTypeNames.Bool).Set(True)
+                material = UsdShade.Material.Define(stage, VEIL_MATERIAL_PATH)
+                shader = UsdShade.Shader.Define(stage, VEIL_MATERIAL_PATH + "/Shader")
+                shader.CreateImplementationSourceAttr(UsdShade.Tokens.sourceAsset)
+                shader.SetSourceAsset(Sdf.AssetPath("OmniPBR.mdl"), "mdl")
+                shader.SetSourceAssetSubIdentifier("OmniPBR", "mdl")
+                shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set((0, 0, 0))
+                shader.CreateInput("specular_level", Sdf.ValueTypeNames.Float).Set(0.0)
+                shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(1.0)
+                shader.CreateInput("enable_emission", Sdf.ValueTypeNames.Bool).Set(True)
+                shader.CreateInput("emissive_color", Sdf.ValueTypeNames.Color3f).Set((1, 1, 1))
+                shader.CreateInput("emissive_color_texture", Sdf.ValueTypeNames.Asset).Set(
+                    Sdf.AssetPath(f"dynamic://{VEIL_TEXTURE_NAME}"))
+                shader.CreateInput("emissive_intensity", Sdf.ValueTypeNames.Float).Set(float(intensity))
+                shader.CreateInput("enable_opacity", Sdf.ValueTypeNames.Bool).Set(True)
+                shader.CreateInput("enable_opacity_texture", Sdf.ValueTypeNames.Bool).Set(True)
+                shader.CreateInput("opacity_texture", Sdf.ValueTypeNames.Asset).Set(
+                    Sdf.AssetPath(f"dynamic://{VEIL_OPACITY_TEXTURE_NAME}"))
+                shader.CreateInput("opacity_mode", Sdf.ValueTypeNames.Int).Set(1)    # the mean of r, g, b
+                shader.CreateInput("opacity_threshold", Sdf.ValueTypeNames.Float).Set(0.0)
+                material.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
+                UsdShade.MaterialBindingAPI.Apply(quad.GetPrim()).Bind(material)
+                UsdGeom.Xformable(quad).AddTransformOp()
+                self._veil_key = None
+                self._veil_visible = True
+                prim = quad.GetPrim()
+            quad = UsdGeom.Mesh(prim)
+            if show != self._veil_visible:
+                UsdGeom.Imageable(prim).GetVisibilityAttr().Set(
+                    UsdGeom.Tokens.inherited if show else UsdGeom.Tokens.invisible)
+                self._veil_visible = show
+            if not show:
+                return
+            key = (round(focal, 4), round(aperture, 4), round(depth, 5), round(aspect, 5))
+            if key != self._veil_key:
+                half_w = depth * 0.5 * aperture / focal
+                half_h = half_w / aspect
+                quad.GetPointsAttr().Set([(-half_w, -half_h, -depth), (half_w, -half_h, -depth),
+                                          (half_w, half_h, -depth), (-half_w, half_h, -depth)])
+                quad.CreateExtentAttr([(-half_w, -half_h, -depth), (half_w, half_h, -depth)])
+                self._veil_key = key
+            UsdGeom.Xformable(quad).GetOrderedXformOps()[0].Set(Gf.Matrix4d(world))
+            shader = UsdShade.Shader(stage.GetPrimAtPath(VEIL_MATERIAL_PATH + "/Shader"))
+            current = shader.GetInput("emissive_intensity").Get()
+            if current is None or abs(intensity - current) > 1e-6 * max(intensity, 1e-9):
+                shader.GetInput("emissive_intensity").Set(float(intensity))
+
     def _remove(self) -> None:
         if not self._authored:
             return
         self._authored = False
         self._quad_key = None
+        self._veil_key = None
+        self._veil_visible = False
         stage = self.context.stage() if hasattr(self, "context") else None
         if stage is None:
             return

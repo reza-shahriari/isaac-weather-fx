@@ -37,6 +37,92 @@ wx.randomize(11)        # 'broken cumulus, larger and deeper'
 
 ---
 
+## New: clouds grown by a fluid solver, drawn for every pixel
+
+<img src="docs/images/pixel_clouds/towers.jpg" width="100%" alt="Towering cumulus standing among fair-weather cumulus, rendered in RTX Real-Time"/>
+
+Set `render_path="pixel"` and the cloud is no longer a picture on the sky dome. Each frame the
+GPU marches the cloud's density along the ray of every camera pixel, so the sky is sharp in every
+direction as the camera turns, and **RTX Real-Time and the path tracer show the same sky**.
+
+The shapes are not noise. Cumulus and towers are grown once, offline, by a fluid solver (Blender's
+gas solver, run headless by [`tools/simulate_cloud_patches.py`](tools/simulate_cloud_patches.py))
+and shipped as small density grids. Isaac Sim does all the rendering; Blender is not needed to use
+them.
+
+```python
+wx.configure(clouds={"enabled": True, "render_path": "pixel", "genus": "cumulus",
+                     "cover": 0.35, "towers": 0.35})
+```
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/pixel_clouds/cumulus_real_time.jpg" width="100%"/></td>
+<td width="50%"><img src="docs/images/pixel_clouds/cumulus_path_traced.jpg" width="100%"/></td>
+</tr>
+<tr>
+<td><b>RTX Real-Time.</b> Flat bases on one level, hard turrets beside ragged flanks, small clouds among the large.</td>
+<td><b>Path-traced.</b> The same frame, the same cloud, the same exposure.</td>
+</tr>
+<tr>
+<td><img src="docs/images/pixel_clouds/towers_east.jpg" width="100%"/></td>
+<td><img src="docs/images/pixel_clouds/storm.jpg" width="100%"/></td>
+</tr>
+<tr>
+<td><b>Towers.</b> <code>towers</code> is the share of large clouds that are tall towers, standing in front of and behind the others.</td>
+<td><b>Storm.</b> <code>genus="storm"</code> covers the whole sky with a deep deck, dark under its thick cells and lighter where it is shallow.</td>
+</tr>
+<tr>
+<td><img src="docs/images/pixel_clouds/veil.jpg" width="100%"/></td>
+<td><img src="docs/images/pixel_clouds/low_sun.jpg" width="100%"/></td>
+</tr>
+<tr>
+<td><b>Clouds hide what is behind them.</b> The red balls are 10 km away, above the layer: the march reads the scene's depth and draws the cloud in front of each one over it.</td>
+<td><b>The colour is computed, not stored.</b> A cloud is only density; change the hour and the same cloud is lit by a low sun.</td>
+</tr>
+<tr>
+<td><img src="docs/images/pixel_clouds/dense.jpg" width="100%"/></td>
+<td><img src="docs/images/pixel_clouds/sparse.jpg" width="100%"/></td>
+</tr>
+<tr>
+<td><b>Close together.</b> <code>spacing_m=1800, small_clouds=0.9, cover=0.6</code></td>
+<td><b>Far apart.</b> <code>spacing_m=6000, cloud_fill=0.5, small_clouds=0, raggedness=1.8</code></td>
+</tr>
+</table>
+
+<div align="center">
+<img src="docs/images/pixel_clouds/pan.gif" width="70%" alt="The camera turning a full circle under the cumulus field"/>
+
+*One full turn of the camera in RTX Real-Time.*
+</div>
+
+| Setting (panel and Python) | What it does |
+|---|---|
+| `genus` | `cumulus`, `congestus` (mostly towers), `stratocumulus`, `stratus`, `storm` |
+| `cover` | Share of the sky the cloud hides |
+| `spacing_m` | Distance between neighbouring large clouds |
+| `cloud_fill` | How much of that spacing a cloud may fill |
+| `small_clouds` | How many small clouds stand among the large ones |
+| `towers` | Share of the large clouds that are towers |
+| `raggedness` | How much the cloud's skin is torn into wisps |
+| `veil_scene` | Draw the cloud over objects inside or behind it |
+
+What to know before relying on it:
+
+- It is opt-in. The default `render_path="auto"` still draws the older dome and volume clouds.
+- It follows one camera (the active viewport's, or `general.follow_prim`).
+- Frame rate at 1280 x 720 on an RTX A6000 was measured only while the card was shared with other
+  jobs: 18 to 30 fps depending on the sky, lowest with towers.
+- The stratocumulus and stratus sheets still use a noise function, not simulated shapes.
+- Cover with simulated cumulus tops out near one half; ask `storm` for a full sky.
+- The cloud is a density in metres with a numpy reference the GPU kernel is tested against, so
+  another sensor can march the same cloud. No infrared or lidar reads it yet.
+
+Every image here was rendered inside Isaac Sim by
+[`examples/capture_cloud_look.py`](examples/capture_cloud_look.py).
+
+---
+
 ## Gallery
 
 Every frame below came out of one script,
@@ -137,6 +223,7 @@ Isaac Sim 5.x / 6.0 (Kit 107+). No dependency but numpy.
 |---|---|---|
 | **Sky** | Sun and moon from the real ephemeris; a Preetham–Shirley–Smits daylight sky, a moonlit night built from the same distribution, and a starlight floor beneath it — baked to an HDR dome | latitude, longitude, date, hour, turbidity, ground albedo, exposure |
 | **Cloud** | A genuine three-dimensional density field with per-height morphology, shaded by multi-octave multiple scattering inside a two-stream albedo envelope | cover, genus, base height, thickness, optical depth, feature size |
+| **Cloud, per pixel** | `render_path="pixel"`: simulated cumulus and towers placed by a weather map and marched on the GPU for every camera pixel, the same in RTX Real-Time and the path tracer | cover, genus, spacing, cloud size, small clouds, towers, raggedness |
 | **Fog** | RTX Simple Fog, driven by **visibility in metres** (Koschmieder, 5 % contrast) | visibility, colour, start/end distance, height fog |
 | **Rain** | A camera-following `PointInstancer`; Marshall–Palmer drop sizes, terminal velocity per drop, streak length = speed × exposure | rate (mm/h), density scale, exposure, drop size range |
 | **Snow** | The same volume system with fall-speed jitter and sway; its water-equivalent rate is *derived* from the flake population | flake density, size, fall speed, sway |

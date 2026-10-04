@@ -22,6 +22,7 @@ Frame: metres, +Y up, the observer's column at x = z = 0, as :class:`~weather_fx
 """
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -47,11 +48,10 @@ PATCH_FOOTPRINT = 0.9
 EROSION_TILE_M = 230.0
 #: The skin erosion's strength swings over this many erosion tiles, between these two factors.
 RAGGED_TILES = 6.0
-#: The small clouds: their lattice's period as a share of the large one's, how much further
-#: into the weather map it reaches than the large clouds do, and the share of its cells kept.
+#: The small clouds: their lattice's period as a share of the large one's, and how much further
+#: into the weather map it reaches than the large clouds do.
 SMALL_PERIOD = 0.4
 SMALL_COVER = 1.5
-SMALL_KEEP = 0.45
 RAGGED_LOW = 0.25
 RAGGED_HIGH = 1.8
 
@@ -151,6 +151,10 @@ class CloudscapeProfile:
     #: Simulated patches: the lattice's cell, metres (one patch, a group of clouds, per cell), and
     #: how much of a patch's density the small noise can eat at its base.
     patch_period_m: float = 3200.0
+    #: How much of its lattice cell a cloud may fill, 0..1: with the period, the gap between clouds.
+    patch_fill: float = 1.0
+    #: The share of the fine lattice's cells that hold a small cloud.
+    small_keep: float = 0.45
     patch_erosion: float = 0.5
     #: Liquid water at the base as a fraction of the top's. Lifted air condenses more the higher
     #: it goes (the adiabat), so a cloud is thin and grey at its base and dense at its top.
@@ -440,14 +444,14 @@ class Cloudscape:
         rank = (wc - (1.0 - cover)) / max(cover, 1.0e-3)
         present = rank > 0.0
         if lattice == 2:
-            present = present & (_cell_hash(cx, cz, 7 + channel) <= SMALL_KEEP)
+            present = present & (_cell_hash(cx, cz, 7 + channel) <= p.small_keep)
         scale = (0.45 + 0.55 * np.sqrt(np.clip(rank, 0.0, None))) * (0.8 + 0.4 * _cell_hash(cx, cz, 2 + channel))
         angle = 6.2831853 * _cell_hash(cx, cz, 5 + channel)
         ca, sa = np.cos(angle), np.sin(angle)
         # The turned box has to fit its cell, or the cell's edge cuts the cloud flat.
         fx = PATCH_FOOTPRINT * (np.abs(ca) * sx + np.abs(sa) * sz)
         fz = PATCH_FOOTPRINT * (np.abs(sa) * sx + np.abs(ca) * sz)
-        scale = np.minimum(scale, period / np.maximum(fx, fz))
+        scale = np.minimum(scale, period / np.maximum(fx, fz)) * p.patch_fill
         lx = x - mx - (_cell_hash(cx, cz, 3 + channel) - 0.5) * np.maximum(period - scale * fx, 0.0)
         lz = z - mz - (_cell_hash(cx, cz, 4 + channel) - 0.5) * np.maximum(period - scale * fz, 0.0)
         u = (ca * lx + sa * lz) / (scale * sx) + 0.5
@@ -485,7 +489,8 @@ class Cloudscape:
             patch_on=1 if self.patches else 0, patch_count=len(self.patches or []),
             patch_size=tuple(float(v) for v in self.patch_size_m),
             patch_period_m=float(p.patch_period_m), patch_cover=float(self.patch_cover),
-            patch_erosion=float(p.patch_erosion))
+            patch_erosion=float(p.patch_erosion), patch_fill=float(p.patch_fill),
+            small_keep=float(p.small_keep))
 
     def measured_cover(self, columns: int = 256) -> float:
         """Fraction of columns holding cloud a camera cannot see through, on a fresh lattice."""
@@ -515,7 +520,7 @@ class Cloudscape:
 
 #: The cloud parameters a cloudscape's textures depend on.
 CLOUDSCAPE_SHAPE_KEYS = ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "seed",
-                         "patches")
+                         "patches", "spacing_m", "cloud_fill", "small_clouds", "raggedness")
 #: Genera drawn from simulated patches when any are installed.
 PATCH_GENERA = ("cumulus", "congestus")
 
@@ -547,8 +552,17 @@ def cloudscape_from_state(state: Any, build: bool = True):
     patches = load_patches(getattr(clouds, "patches", "") or None) if clouds.genus in PATCH_GENERA else []
     if getattr(clouds, "patches", "") == "none":
         patches = []
+    profile = CLOUDSCAPE_TYPES[clouds.genus]
+    # The owner's controls over the field of patches; each leaves the genus default at its own.
+    spacing = float(getattr(clouds, "spacing_m", 0.0))
+    profile = dataclasses.replace(
+        profile,
+        patch_period_m=spacing if spacing > 0.0 else profile.patch_period_m,
+        patch_fill=float(getattr(clouds, "cloud_fill", profile.patch_fill)),
+        small_keep=float(getattr(clouds, "small_clouds", profile.small_keep)),
+        patch_erosion=profile.patch_erosion * float(getattr(clouds, "raggedness", 1.0)))
     built = Cloudscape(cover=float(clouds.cover), base_m=float(base),
-                       profile=CLOUDSCAPE_TYPES[clouds.genus], seed=int(clouds.seed),
+                       profile=profile, seed=int(clouds.seed),
                        patches=patches or None)
     while len(_CACHE) >= 2:
         _CACHE.pop(next(iter(_CACHE)))

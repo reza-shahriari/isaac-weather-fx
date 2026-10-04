@@ -49,6 +49,8 @@ parser.add_argument("--skip-path-traced", action="store_true")
 parser.add_argument("--skip-timing", action="store_true")
 parser.add_argument("--targets", action="store_true",
                     help="red balls in the az180 view: a grid behind the cloud layer and two in front of it")
+parser.add_argument("--set", nargs="*", default=[], metavar="NAME=VALUE",
+                    help="more cloud settings, as the UI names them: spacing_m=1800 small_clouds=0.8 ...")
 parser.add_argument("--no-veil", action="store_true", help="do not draw the cloud over scene objects")
 parser.add_argument("--pan", type=int, default=0, help="frames of a full turn in Real-Time, as pan.mp4 (0: skip)")
 args, _ = parser.parse_known_args()
@@ -118,7 +120,8 @@ wx.set_time(date_utc="2024-06-21")
 wx.configure(sky={"enabled": True, "hour_utc": VIEWS[0][1]},
              clouds={"enabled": True, "render_path": "pixel", "cover": args.cover,
                      "genus": args.genus, "seed": args.seed, "patches": args.patches,
-                     "layer_scale": args.layer_scale, "veil_scene": not args.no_veil})
+                     "layer_scale": args.layer_scale, "veil_scene": not args.no_veil,
+                     **{k: float(v) for k, v in (item.split("=", 1) for item in args.set)}})
 
 camera = UsdGeom.Camera(stage.GetPrimAtPath(SKY_CAMERA))
 

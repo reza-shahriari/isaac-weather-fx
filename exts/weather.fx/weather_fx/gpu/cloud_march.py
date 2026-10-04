@@ -130,6 +130,8 @@ class Layer:
     patch_on: int
     patch_size: wp.vec3
     patch_period_m: float
+    patch_fill: float
+    small_keep: float
     patch_cover: float
     #: Volumes side by side along the texture's u axis, one picked per cell.
     patch_count: int
@@ -183,7 +185,6 @@ VEIL_OPACITY_MAX = 0.995
 VEIL_NEEDED = 0.004
 SMALL_PERIOD = 0.4
 SMALL_COVER = 1.5
-SMALL_KEEP = 0.45
 RAGGED_TILES = 6.0
 RAGGED_LOW = 0.25
 RAGGED_HIGH = 1.8
@@ -209,7 +210,7 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, pe
     mx = (float(cx) + 0.5) * period + shift
     mz = (float(cz) + 0.5) * period + shift
     # The small clouds' lattice is fine, and only some of its cells hold one.
-    if lattice == 2 and cell_hash(cx, cz, 7 + channel) > SMALL_KEEP:
+    if lattice == 2 and cell_hash(cx, cz, 7 + channel) > L.small_keep:
         return 0.0
     # Which cells hold cloud comes from the weather map (its coverage is uniform over 0..1 and
     # smooth over kilometres), so clouds gather in groups with clear lanes between them, and
@@ -225,7 +226,7 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, pe
     # The turned box has to fit its cell, or the cell's edge cuts the cloud flat.
     fx = PATCH_FOOTPRINT * (wp.abs(ca) * L.patch_size[0] + wp.abs(sa) * L.patch_size[2])
     fz = PATCH_FOOTPRINT * (wp.abs(sa) * L.patch_size[0] + wp.abs(ca) * L.patch_size[2])
-    scale = wp.min(scale, period / wp.max(fx, fz))
+    scale = wp.min(scale, period / wp.max(fx, fz)) * L.patch_fill
     lx = x - mx - (cell_hash(cx, cz, 3 + channel) - 0.5) * wp.max(period - scale * fx, 0.0)
     lz = z - mz - (cell_hash(cx, cz, 4 + channel) - 0.5) * wp.max(period - scale * fz, 0.0)
     u = (ca * lx + sa * lz) / (scale * L.patch_size[0]) + 0.5

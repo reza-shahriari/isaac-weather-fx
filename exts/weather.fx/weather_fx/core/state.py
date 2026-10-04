@@ -212,6 +212,18 @@ class CloudParams:
     layer_scale: float = param(0.75, "Pixel layer scale", min=0.25, max=1.0, advanced=True,
                                tooltip="Resolution of the per-pixel cloud layer as a fraction "
                                        "of the viewport's. Lower is faster and softer.")
+    spacing_m: float = param(0.0, "Cloud spacing", min=0.0, max=12000.0, unit="m",
+                             tooltip="Distance between the centres of neighbouring large clouds "
+                                     "(cumulus and congestus). 0 uses the cloud type's own.")
+    cloud_fill: float = param(1.0, "Cloud size", min=0.25, max=1.0,
+                              tooltip="How much of the spacing a cloud may fill. 1: neighbours "
+                                      "nearly touch; 0.4: small clouds with wide gaps.")
+    small_clouds: float = param(0.45, "Small clouds", min=0.0, max=1.0,
+                                tooltip="How many small clouds stand among the large ones: 0 none, "
+                                        "1 one in every place there is room for.")
+    raggedness: float = param(1.0, "Raggedness", min=0.0, max=2.0,
+                              tooltip="How much the cloud's skin is torn into wisps. 0: smooth, "
+                                      "solid outlines; 2: frayed, evaporating clouds.")
     veil_scene: bool = param(True, "Cloud in front of objects", advanced=True,
                              tooltip="Per-pixel layer: read the scene's depth and draw the cloud "
                                      "that lies in front of an object over it, so an object inside "

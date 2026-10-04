@@ -563,6 +563,56 @@ class Cloudscape:
         bias = self.patch_cover if self.patches else self.coverage_bias
         return float((self._column_optical_depth(x, z, bias, 20) > self._cloudy_optical_depth).mean())
 
+    # --- what another sensor's march reads (the contract a CloudField also meets) ---------------
+
+    @property
+    def thickness_m(self) -> float:
+        """Depth of the layer the clouds may occupy, metres."""
+        return float(self.profile.thickness_m)
+
+    @property
+    def finest_pitch_m(self) -> float:
+        """The finest spacing a march has to resolve, metres: a patch's cell, or the detail
+        noise's cell for the function. The skin erosion's smaller noise is finer than this; it
+        tears the outline, and a march that steps over it misplaces an edge by less than a cell."""
+        if self.patches:
+            return float(min(q.voxel_m for q in self.patches))
+        return float(self.profile.detail_tile_m / self.detail_cells)
+
+    @property
+    def optical_depth(self) -> float:
+        """Visible optical depth of the median cloudy column, straight up (0 for a clear sky)."""
+        cached = getattr(self, "_median_optical_depth", None)
+        if cached is None:
+            cached = 0.0
+            if self.cover > 0.0:
+                n = 96
+                axis = (np.arange(n) + 0.25) / n * self.weather_tile_m
+                x, z = np.meshgrid(axis, axis, indexing="xy")
+                bias = self.patch_cover if self.patches else self.coverage_bias
+                column = self._column_optical_depth(x, z, bias, 20)
+                cloudy = column > self._cloudy_optical_depth
+                cached = float(np.median(column[cloudy])) if cloudy.any() else 0.0
+            self._median_optical_depth = cached
+        return cached
+
+    def slab_span(self, origin_m: Any, direction: Any) -> Tuple[np.ndarray, np.ndarray]:
+        """Where a ray enters and leaves the layer, as distances along it (``CloudField.slab_span``):
+        ``exit <= enter`` for a ray that misses it; a ray starting inside enters at zero."""
+        origin = np.asarray(origin_m, dtype=np.float64)
+        direction = np.asarray(direction, dtype=np.float64)
+        oy, dy = np.broadcast_arrays(origin[..., 1], direction[..., 1])
+        steep = np.abs(dy) > 1e-9
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t_base = (self.base_m - oy) / dy
+            t_top = (self.top_m - oy) / dy
+        lo = np.where(steep, np.minimum(t_base, t_top), 0.0)
+        hi = np.where(steep, np.maximum(t_base, t_top), 0.0)
+        level_inside = (~steep) & (oy >= self.base_m) & (oy <= self.top_m)
+        near = np.where(steep, np.maximum(lo, 0.0), np.where(level_inside, 0.0, 1.0))
+        far = np.where(steep, np.maximum(hi, 0.0), np.where(level_inside, 1.0e6, 0.0))
+        return near, far
+
     def optical_depth_toward(self, origin_m: Any, direction: Any, samples: int = 96) -> float:
         """Visible optical depth from a point through the layer along a direction (flat slab)."""
         o = np.asarray(origin_m, dtype=np.float64)

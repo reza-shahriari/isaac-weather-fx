@@ -256,3 +256,19 @@ def test_the_gpu_composite_is_the_sky_where_there_is_no_cloud(cumulus: C.Cloudsc
     sky = S.sky_radiance_rgb(d, conditions) / conditions.exposure_scale * np.array([1.0, 0.5, 2.0]) * 3.0
     assert np.allclose(out[..., :3], sky, rtol=0.03)
     assert np.all(out[..., 3] == 1.0)
+
+
+def test_a_cloudscape_offers_what_another_sensors_march_reads(cumulus: C.Cloudscape) -> None:
+    """The members an infrared march sizes and bounds itself by: the layer's span on a ray, the
+    finest pitch, the thickness and the median cloudy column's optical depth."""
+    assert cumulus.thickness_m == cumulus.top_m - cumulus.base_m
+    assert 1.0 < cumulus.finest_pitch_m < 200.0
+    assert cumulus.optical_depth > C.CLOUDY_OPTICAL_DEPTH
+    up = np.array([0.0, 1.0, 0.0])
+    near, far = cumulus.slab_span(np.zeros(3), up)
+    assert float(near) == pytest.approx(cumulus.base_m) and float(far) == pytest.approx(cumulus.top_m)
+    inside = np.array([0.0, cumulus.base_m + 100.0, 0.0])
+    near, far = cumulus.slab_span(inside, up)
+    assert float(near) == 0.0 and float(far) == pytest.approx(cumulus.thickness_m - 100.0)
+    near, far = cumulus.slab_span(np.array([0.0, cumulus.top_m + 10.0, 0.0]), up)
+    assert float(far) <= float(near)

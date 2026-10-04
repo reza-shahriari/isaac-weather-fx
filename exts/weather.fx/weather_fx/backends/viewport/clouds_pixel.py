@@ -199,12 +199,37 @@ class CloudLayerEffect(Effect):
         except Exception:
             pass
         follow = self.context.state.general.follow_prim
-        if follow and stage.GetPrimAtPath(follow).GetTypeName() == "Camera":
+        if follow and stage.GetPrimAtPath(follow).GetTypeName() == "Camera" and follow != path:
             path = follow
+            # Not the viewport's camera, so not the viewport's frame either: the layer has to
+            # have the shape of what renders this camera, or its quad leaves the frame's top and
+            # bottom bare. A render product of the camera says it; failing that, its apertures.
+            size = self._frame_of(stage, follow, size)
         if not path:
             return None, size
         prim = stage.GetPrimAtPath(path)
         return (prim if prim and prim.GetTypeName() == "Camera" else None), size
+
+    @staticmethod
+    def _frame_of(stage: Any, camera_path: str, fallback: Any) -> Any:
+        """``(width, height)`` of the frame a camera is rendered at."""
+        from pxr import Usd, UsdGeom
+
+        render = stage.GetPrimAtPath("/Render")
+        if render:
+            for prim in Usd.PrimRange(render):
+                if prim.GetTypeName() != "RenderProduct":
+                    continue
+                targets = prim.GetRelationship("camera").GetTargets()
+                resolution = prim.GetAttribute("resolution").Get() if targets else None
+                if targets and str(targets[0]) == camera_path and resolution:
+                    return int(resolution[0]), int(resolution[1])
+        camera = UsdGeom.Camera(stage.GetPrimAtPath(camera_path))
+        wide = camera.GetHorizontalApertureAttr().Get()
+        tall = camera.GetVerticalApertureAttr().Get()
+        if wide and tall:
+            return int(fallback[0]), max(8, int(round(fallback[0] * float(tall) / float(wide))))
+        return fallback
 
     # --- the scene's depth, for the cloud in front of objects ----------------------------------
 

@@ -53,6 +53,9 @@ ap.add_argument("--seed", type=int, default=1)
 ap.add_argument("--bubbles", type=int, default=9)
 ap.add_argument("--wind", type=float, default=0.0)
 ap.add_argument("--dissolve", type=int, default=0)
+ap.add_argument("--tower", action="store_true",
+                help="a towering cumulus: a 4 km tall domain, a few large hot bubbles close together")
+ap.add_argument("--coarsen", type=int, default=1, help="average this many cells a side into one")
 ap.add_argument("--keep-cache", action="store_true")
 a = ap.parse_args(argv)
 
@@ -63,9 +66,10 @@ def simulate(cache: str) -> None:
     scene = bpy.context.scene
     scene.frame_start, scene.frame_end = 1, a.frames
 
-    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 10.0))
+    height = 40.0 if a.tower else 20.0
+    bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0, 0, 0.5 * height))
     domain = bpy.context.active_object
-    domain.scale = (32.0, 32.0, 20.0)
+    domain.scale = (32.0, 32.0, height)
     bpy.ops.object.transform_apply(scale=True)
     mod = domain.modifiers.new("Fluid", "FLUID")
     mod.fluid_type = "DOMAIN"
@@ -93,6 +97,10 @@ def simulate(cache: str) -> None:
     for _ in range(a.bubbles):
         r = random.uniform(0.9, 3.6)
         x, y = random.uniform(-9.5, 9.5), random.uniform(-9.5, 9.5)
+        if a.tower:
+            # One thermal fed for a long time by a few large sources that merge as they rise.
+            r = random.uniform(2.4, 4.4)
+            x, y = random.uniform(-5.0, 5.0), random.uniform(-5.0, 5.0)
         bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=3, radius=r, location=(x, y, 1.2 + r))
         o = bpy.context.active_object
         o.scale = (1.0, random.uniform(0.7, 1.3), 0.6)
@@ -102,10 +110,10 @@ def simulate(cache: str) -> None:
         f.flow_type = "SMOKE"
         f.flow_behavior = "INFLOW"
         f.density = 1.0
-        f.temperature = random.uniform(1.0, 5.0)
+        f.temperature = random.uniform(4.0, 8.0) if a.tower else random.uniform(1.0, 5.0)
         f.surface_distance = 0.5
         f.volume_density = 1.0
-        stop = random.randint(14, 45)
+        stop = random.randint(45, 85) if a.tower else random.randint(14, 45)
         f.use_inflow = True
         f.keyframe_insert("use_inflow", frame=1)
         f.keyframe_insert("use_inflow", frame=stop)
@@ -115,7 +123,7 @@ def simulate(cache: str) -> None:
     if a.wind > 0.0:
         # A wind field above the domain, fading with distance below it: the tops are carried
         # further than the bases.
-        bpy.ops.object.effector_add(type="WIND", location=(0.0, 0.0, 24.0), rotation=(0.0, math.radians(90.0), 0.0))
+        bpy.ops.object.effector_add(type="WIND", location=(0.0, 0.0, height + 4.0), rotation=(0.0, math.radians(90.0), 0.0))
         w = bpy.context.active_object.field
         w.strength = a.wind
         w.flow = 0.0
@@ -203,6 +211,11 @@ def convert(cache: str, name: str) -> None:
     values = values[:, int(CONDENSATION * values.shape[1]):, :]
     values = trim(flat_base(values))
     values = round_off(values, a.seed)
+    if a.coarsen > 1:
+        n = a.coarsen
+        nx, ny, nz = (v // n * n for v in values.shape)
+        values = values[:nx, :ny, :nz].reshape(nx // n, n, ny // n, n, nz // n, n).mean(axis=(1, 3, 5))
+        voxel_m *= n
     density = np.round(255.0 * np.clip(values / values.max(), 0.0, 1.0)).astype(np.uint8)
     os.makedirs(a.out, exist_ok=True)
     out = os.path.join(a.out, name + ".npz")

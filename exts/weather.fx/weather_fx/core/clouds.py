@@ -210,6 +210,24 @@ CLOUD_TYPES: Dict[str, CloudProfile] = {
         phase="liquid",
         effective_radius_um=9.0,
     ),
+    # Storm: a deep, dark deck over the whole sky (nimbostratus and the base of cumulonimbus),
+    # its underside in heavy rolls.
+    "storm": CloudProfile(
+        name="storm",
+        height_points=(0.0, 0.08, 0.6, 0.9, 1.0),
+        area_points=(1.0, 1.0, 0.97, 0.85, 0.5),
+        thickness_m=3000.0,
+        optical_depth=80.0,
+        erosion=0.3,
+        beta=2.8,
+        billow=0.8,
+        columnar=0.5,
+        spacing=6.0,
+        phase="mixed",
+        effective_radius_um=12.0,
+        ice_effective_diameter_um=70.0,
+        ice_fraction=0.3,
+    ),
     # Cirrus: high, thin, streaked hard along the wind, and optically shallow.
     "cirrus": CloudProfile(
         name="cirrus",

@@ -132,6 +132,11 @@ class Layer:
     patch_period_m: float
     patch_fill: float
     small_keep: float
+    #: Towers: how many patches of them follow the cumulus ones in the atlas, their box, and the
+    #: share of the large clouds' cells that hold one.
+    tower_count: int
+    tower_size: wp.vec3
+    towers: float
     patch_cover: float
     #: Volumes side by side along the texture's u axis, one picked per cell.
     patch_count: int
@@ -223,20 +228,31 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, pe
     angle = 6.2831853 * cell_hash(cx, cz, 5 + channel)
     ca = wp.cos(angle)
     sa = wp.sin(angle)
+    # Some of the large clouds are towers: another set of patches in a taller box.
+    size = L.patch_size
+    tower = int(0)
+    if L.tower_count > 0 and lattice != 2 and L.towers > 0.0:
+        if cell_hash(cx, cz, 8 + channel) < L.towers:
+            tower = 1
+            size = L.tower_size
     # The turned box has to fit its cell, or the cell's edge cuts the cloud flat.
-    fx = PATCH_FOOTPRINT * (wp.abs(ca) * L.patch_size[0] + wp.abs(sa) * L.patch_size[2])
-    fz = PATCH_FOOTPRINT * (wp.abs(sa) * L.patch_size[0] + wp.abs(ca) * L.patch_size[2])
+    fx = PATCH_FOOTPRINT * (wp.abs(ca) * size[0] + wp.abs(sa) * size[2])
+    fz = PATCH_FOOTPRINT * (wp.abs(sa) * size[0] + wp.abs(ca) * size[2])
     scale = wp.min(scale, period / wp.max(fx, fz)) * L.patch_fill
     lx = x - mx - (cell_hash(cx, cz, 3 + channel) - 0.5) * wp.max(period - scale * fx, 0.0)
     lz = z - mz - (cell_hash(cx, cz, 4 + channel) - 0.5) * wp.max(period - scale * fz, 0.0)
-    u = (ca * lx + sa * lz) / (scale * L.patch_size[0]) + 0.5
-    v = (y - L.base_m) / (scale * L.patch_size[1])
-    w = (-sa * lx + ca * lz) / (scale * L.patch_size[2]) + 0.5
+    u = (ca * lx + sa * lz) / (scale * size[0]) + 0.5
+    v = (y - L.base_m) / (scale * size[1])
+    w = (-sa * lx + ca * lz) / (scale * size[2]) + 0.5
     if u <= 0.0 or u >= 1.0 or v <= 0.0 or v >= 1.0 or w <= 0.0 or w >= 1.0:
         return 0.0
-    which = wp.min(int(cell_hash(cx, cz, 6 + channel) * float(L.patch_count)), L.patch_count - 1)
+    pick = cell_hash(cx, cz, 6 + channel)
+    which = wp.min(int(pick * float(L.patch_count)), L.patch_count - 1)
+    if tower != 0:
+        which = L.patch_count + wp.min(int(pick * float(L.tower_count)), L.tower_count - 1)
     # Each patch keeps an empty margin in the atlas, so linear filtering never mixes two.
-    d = wp.texture_sample(patches, wp.vec3f((float(which) + 0.02 + 0.96 * u) / float(L.patch_count), v, w), dtype=float)
+    slots = float(L.patch_count + L.tower_count)
+    d = wp.texture_sample(patches, wp.vec3f((float(which) + 0.02 + 0.96 * u) / slots, v, w), dtype=float)
     # A cloud the simulation's wind pushed against its domain's wall thins out toward the box's
     # side, not into a flat cut.
     d = d * smoothstep(0.0, 0.08, wp.min(wp.min(u, 1.0 - u), wp.min(w, 1.0 - w)))
@@ -673,6 +689,9 @@ class Compose:
     gains: wp.vec3
     scale: float
     flip: int
+    #: The share of the clear air's light in front of a cloud that is left under this cloud
+    #: cover: the sun's beam, which makes most of it, does not reach air a deck shades.
+    air_light: float
 
 
 @wp.func
@@ -709,7 +728,7 @@ def compose_layer(
         tr4 = wp.texture_sample(air_tr, uvw, dtype=wp.vec4f)
         c = scattered[j, i]
         colour = (colour * t + wp.vec3(c[0] * tr4[0], c[1] * tr4[1], c[2] * tr4[2])
-                  + wp.vec3(ins4[0], ins4[1], ins4[2]) * (1.0 - t))
+                  + wp.vec3(ins4[0], ins4[1], ins4[2]) * ((1.0 - t) * K.air_light))
     row = j
     if K.flip != 0:
         row = M.height - 1 - j
@@ -753,7 +772,7 @@ def compose_veil(
         uvw = wp.vec3f(rel / 3.14159265, row_of_elevation(wp.asin(wp.clamp(d[1], -1.0, 1.0))), wp.clamp(w, 0.0, 1.0))
         ins4 = wp.texture_sample(air_in, uvw, dtype=wp.vec4f)
         tr4 = wp.texture_sample(air_tr, uvw, dtype=wp.vec4f)
-        ins = wp.vec3(ins4[0], ins4[1], ins4[2])
+        ins = wp.vec3(ins4[0], ins4[1], ins4[2]) * K.air_light
         cover = 1.0 - trans[j, i]
         c = scattered[j, i]
         share = cover
@@ -844,7 +863,7 @@ class CloudRenderer:
         gains: Tuple[float, float, float] = (1.0, 1.0, 1.0), scale: float = 1.0, flip: bool = False,
         density_scale: float = 1.0, max_distance_m: float = 80_000.0, step_min_m: float = 24.0,
         step_growth: float = 0.012, max_steps: int = 768, accumulate_frames: int = 16,
-        depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9,
+        depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9, air_light: float = 1.0,
     ):
         """The finished layer for one camera, left on the GPU: a ``(height, width)`` ``vec4``
         Warp array of the cloud composed over the clear sky through the air, times ``gains`` and
@@ -868,6 +887,7 @@ class CloudRenderer:
         k.gains = wp.vec3(*[float(g) for g in gains])
         k.scale = float(scale)
         k.flip = 1 if flip else 0
+        k.air_light = float(air_light)
         shape = (camera.height, camera.width)
         with wp.ScopedDevice(self.device):
             if self._layer is None or self._layer.shape != shape:

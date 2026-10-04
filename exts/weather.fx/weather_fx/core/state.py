@@ -224,6 +224,10 @@ class CloudParams:
     raggedness: float = param(1.0, "Raggedness", min=0.0, max=2.0,
                               tooltip="How much the cloud's skin is torn into wisps. 0: smooth, "
                                       "solid outlines; 2: frayed, evaporating clouds.")
+    towers: float = param(0.0, "Towering clouds", min=0.0, max=1.0,
+                          tooltip="The share of the large clouds that are tall towers standing "
+                                  "among the others. 0 uses the cloud type's own: none for "
+                                  "cumulus, most for congestus.")
     veil_scene: bool = param(True, "Cloud in front of objects", advanced=True,
                              tooltip="Per-pixel layer: read the scene's depth and draw the cloud "
                                      "that lies in front of an object over it, so an object inside "
@@ -251,7 +255,7 @@ class CloudParams:
                          tooltip="Fraction of the sky the cloud hides. This is solved for, not "
                                  "approximated: ask for 0.45 and the field measures 0.45.")
     genus: str = param("cumulus", "Cloud type",
-                       choices=("cumulus", "congestus", "stratocumulus", "stratus", "cirrus"),
+                       choices=("cumulus", "congestus", "stratocumulus", "stratus", "storm", "cirrus"),
                        tooltip="Sets the vertical shape, the thickness and the optical depth. "
                                "A stratus is a sheet; a cumulus has a flat base and a "
                                "cauliflower top; cirrus is thin and streaked along the wind.")

@@ -85,6 +85,15 @@ def load_patches(directory: Any = None) -> List[CloudPatch]:
     return [found[name] for name in sorted(found)]
 
 
+def load_towers(directory: Any = None) -> List[CloudPatch]:
+    """The towering patches: the ``towers`` folder beside the patches :func:`load_patches` reads."""
+    directories = [pathlib.Path(directory).expanduser()] if directory else list(PATCH_DIRECTORIES)
+    for folder in directories:
+        if folder.is_dir() and any(folder.glob("*.npz")):
+            return load_patches(folder / "towers") if (folder / "towers").is_dir() else []
+    return []
+
+
 def _cell_hash(i: np.ndarray, j: np.ndarray, k: int) -> np.ndarray:
     """``gpu.cloud_march.cell_hash``: a number in 0..1 per lattice cell and channel."""
     with np.errstate(over="ignore"):
@@ -94,6 +103,21 @@ def _cell_hash(i: np.ndarray, j: np.ndarray, k: int) -> np.ndarray:
         n = (n << np.uint32(13)) ^ n
         n = n * (n * n * np.uint32(15731) + np.uint32(789221)) + np.uint32(1376312589)
     return (n & np.uint32(0x7FFFFFFF)).astype(np.float64) / 2147483648.0
+
+
+def _resize(a: np.ndarray, shape: Tuple[int, int, int]) -> np.ndarray:
+    """``a`` resampled to ``shape`` by linear interpolation along each axis in turn."""
+    for axis, n in enumerate(shape):
+        m = a.shape[axis]
+        if m == n:
+            continue
+        at = (np.arange(n) + 0.5) * m / n - 0.5
+        lo = np.clip(np.floor(at).astype(np.int64), 0, m - 1)
+        hi = np.clip(lo + 1, 0, m - 1)
+        f = np.clip(at - lo, 0.0, 1.0).astype(np.float32)
+        f = f.reshape([-1 if k == axis else 1 for k in range(a.ndim)])
+        a = np.take(a, lo, axis=axis) * (1.0 - f) + np.take(a, hi, axis=axis) * f
+    return a
 
 
 def _sample_clamped(texture: np.ndarray, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> np.ndarray:
@@ -155,6 +179,8 @@ class CloudscapeProfile:
     patch_fill: float = 1.0
     #: The share of the fine lattice's cells that hold a small cloud.
     small_keep: float = 0.45
+    #: The share of the large clouds that are towers (the patches in ``towers/``), 0..1.
+    towers: float = 0.0
     patch_erosion: float = 0.5
     #: Liquid water at the base as a fraction of the top's. Lifted air condenses more the higher
     #: it goes (the adiabat), so a cloud is thin and grey at its base and dense at its top.
@@ -170,11 +196,18 @@ CLOUDSCAPE_TYPES: Dict[str, CloudscapeProfile] = {
         taper=0.6, spacing_m=2600.0, smallest_m=500.0, erosion=0.5, shape_tile_m=4200.0,
         lobe_div=6.0, fine_div=12.0),
     "congestus": CloudscapeProfile(
-        name="congestus", thickness_m=3800.0, extinction_per_m=0.07, top_min=0.3, top_max=1.0,
+        name="congestus", towers=0.7, thickness_m=3800.0, extinction_per_m=0.07, top_min=0.3, top_max=1.0,
         taper=0.45, spacing_m=4200.0, smallest_m=800.0, erosion=0.36, shape_tile_m=6400.0),
     "stratocumulus": CloudscapeProfile(
         name="stratocumulus", thickness_m=550.0, extinction_per_m=0.045, top_min=0.75, top_max=1.0,
         taper=0.15, spacing_m=2200.0, smallest_m=500.0, erosion=0.30, shape_tile_m=3000.0),
+    # A storm deck over the whole sky. What one sees from below is how thick it is: where the
+    # deck is shallow it glows, under its deep cells it is dark, so its depth swings widely from
+    # place to place while its base stays on one level.
+    "storm": CloudscapeProfile(
+        name="storm", thickness_m=3000.0, extinction_per_m=0.035, top_min=0.1, top_max=1.0,
+        taper=0.25, spacing_m=3000.0, smallest_m=600.0, erosion=0.5, shape_tile_m=5200.0,
+        lobe_div=5.0, fine_div=11.0, edge_base=6.0, water_base=0.7),
     "stratus": CloudscapeProfile(
         name="stratus", thickness_m=400.0, extinction_per_m=0.03, top_min=0.9, top_max=1.0,
         taper=0.0, spacing_m=6000.0, smallest_m=1500.0, erosion=0.12, shape_tile_m=5000.0),
@@ -258,11 +291,14 @@ class Cloudscape:
     #: Simulated patches of cloud. With any, they are the cloud: the weather map says which
     #: lattice cells hold one, and the noise function is not used. ``None`` or empty: the function.
     patches: Optional[List[CloudPatch]] = None
+    #: Towering cumulus patches, placed in ``profile.towers`` of the large clouds' cells.
+    towers: Optional[List[CloudPatch]] = None
     #: (nz, ny, slots * nx) float32: the patches side by side, indexed ``[w, v, u]``.
     patch_atlas: Optional[np.ndarray] = field(init=False, default=None, repr=False)
     #: How full the two lattices of patches are, 0..2, as the cover solve found.
     patch_cover: float = field(init=False, default=0.0)
     patch_size_m: Tuple[float, float, float] = field(init=False, default=(1.0, 1.0, 1.0))
+    tower_size_m: Tuple[float, float, float] = field(init=False, default=(1.0, 1.0, 1.0))
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.cover <= 1.0:
@@ -311,13 +347,17 @@ class Cloudscape:
         self.coverage_bias = self._solve_cover()
 
     def _build_atlas(self) -> None:
+        """One 3-D texture holding every patch side by side along x, each in a slot of the same
+        number of cells. The cumulus patches share one box in metres (``patch_size_m``) and the
+        towers another (``tower_size_m``); a tower is resampled into its slot."""
         patches = self.patches or []
+        towers = self.towers or []
         voxel = float(patches[0].voxel_m)
         nx = max(q.density.shape[0] for q in patches)
         ny = max(q.density.shape[1] for q in patches)
         nz = max(q.density.shape[2] for q in patches)
         slot = int(round(nx / (1.0 - 2.0 * ATLAS_MARGIN)))
-        atlas = np.zeros((slot * len(patches), ny, nz), dtype=np.float32)
+        atlas = np.zeros((slot * (len(patches) + len(towers)), ny, nz), dtype=np.float32)
         for k, q in enumerate(patches):
             if abs(q.voxel_m - voxel) > 1e-3 * voxel:
                 raise ValueError("cloud patches must share one voxel size")
@@ -325,8 +365,21 @@ class Cloudscape:
             x0 = k * slot + (slot - sx) // 2
             z0 = (nz - sz) // 2
             atlas[x0:x0 + sx, :sy, z0:z0 + sz] = q.density
-        self.patch_atlas = np.ascontiguousarray(atlas.transpose(2, 1, 0))
         self.patch_size_m = (nx * voxel, ny * voxel, nz * voxel)
+        if towers:
+            size = tuple(max(q.density.shape[axis] * q.voxel_m for q in towers) for axis in range(3))
+            for k, q in enumerate(towers):
+                # Centred in the towers' common box (standing on its floor), then that box
+                # resampled to the slot's cells.
+                cells = tuple(int(round(size[axis] / q.voxel_m)) for axis in range(3))
+                box = np.zeros(cells, dtype=np.float32)
+                sx, sy, sz = (min(q.density.shape[axis], cells[axis]) for axis in range(3))
+                x0, z0 = (cells[0] - sx) // 2, (cells[2] - sz) // 2
+                box[x0:x0 + sx, :sy, z0:z0 + sz] = q.density[:sx, :sy, :sz]
+                x0 = (len(patches) + k) * slot + (slot - nx) // 2
+                atlas[x0:x0 + nx, :, :] = _resize(box, (nx, ny, nz))
+            self.tower_size_m = tuple(float(v) for v in size)
+        self.patch_atlas = np.ascontiguousarray(atlas.transpose(2, 1, 0))
 
     def _solve_cover(self) -> float:
         """The coverage bias at which the fraction of cloudy columns is the cover asked for.
@@ -432,8 +485,8 @@ class Cloudscape:
         p = self.profile
         x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x_m, y_m, z_m)))
         h = (y - self.base_m) / p.thickness_m
-        sx, sy, sz = self.patch_size_m
         count = len(self.patches or [])
+        tall = len(self.towers or [])
         shift = 0.5 * period * lattice
         channel = 10 * lattice
         cx = np.floor((x - shift) / period)
@@ -446,6 +499,11 @@ class Cloudscape:
         if lattice == 2:
             present = present & (_cell_hash(cx, cz, 7 + channel) <= p.small_keep)
         scale = (0.45 + 0.55 * np.sqrt(np.clip(rank, 0.0, None))) * (0.8 + 0.4 * _cell_hash(cx, cz, 2 + channel))
+        # Some of the large clouds are towers: another set of patches in a taller box.
+        tower = np.zeros(x.shape, dtype=bool)
+        if tall and lattice != 2 and p.towers > 0.0:
+            tower = _cell_hash(cx, cz, 8 + channel) < p.towers
+        sx, sy, sz = (np.where(tower, t, c) for t, c in zip(self.tower_size_m, self.patch_size_m))
         angle = 6.2831853 * _cell_hash(cx, cz, 5 + channel)
         ca, sa = np.cos(angle), np.sin(angle)
         # The turned box has to fit its cell, or the cell's edge cuts the cloud flat.
@@ -458,8 +516,10 @@ class Cloudscape:
         v = (y - self.base_m) / (scale * sy)
         w = (-sa * lx + ca * lz) / (scale * sz) + 0.5
         inside = present & (h > 0.0) & (h < 1.0) & (u > 0.0) & (u < 1.0) & (v > 0.0) & (v < 1.0) & (w > 0.0) & (w < 1.0)
-        which = np.minimum((_cell_hash(cx, cz, 6 + channel) * count).astype(np.int64), count - 1)
-        d = _sample_clamped(self.patch_atlas, (which + ATLAS_MARGIN + (1.0 - 2.0 * ATLAS_MARGIN) * np.clip(u, 0.0, 1.0)) / count,
+        pick = _cell_hash(cx, cz, 6 + channel)
+        which = np.where(tower, count + np.minimum((pick * max(tall, 1)).astype(np.int64), max(tall, 1) - 1),
+                         np.minimum((pick * count).astype(np.int64), count - 1))
+        d = _sample_clamped(self.patch_atlas, (which + ATLAS_MARGIN + (1.0 - 2.0 * ATLAS_MARGIN) * np.clip(u, 0.0, 1.0)) / (count + tall),
                             np.clip(v, 0.0, 1.0), np.clip(w, 0.0, 1.0))
         d = d * _smoothstep(0.0, 0.08, np.minimum(np.minimum(u, 1.0 - u), np.minimum(w, 1.0 - w)))
         d = d * _smoothstep(0.0, 0.06, 0.5 - np.maximum(np.abs(x - mx), np.abs(z - mz)) / period)
@@ -490,7 +550,9 @@ class Cloudscape:
             patch_size=tuple(float(v) for v in self.patch_size_m),
             patch_period_m=float(p.patch_period_m), patch_cover=float(self.patch_cover),
             patch_erosion=float(p.patch_erosion), patch_fill=float(p.patch_fill),
-            small_keep=float(p.small_keep))
+            small_keep=float(p.small_keep), tower_count=len(self.towers or []),
+            tower_size=tuple(float(v) for v in self.tower_size_m),
+            towers=float(p.towers) if self.towers else 0.0)
 
     def measured_cover(self, columns: int = 256) -> float:
         """Fraction of columns holding cloud a camera cannot see through, on a fresh lattice."""
@@ -520,7 +582,7 @@ class Cloudscape:
 
 #: The cloud parameters a cloudscape's textures depend on.
 CLOUDSCAPE_SHAPE_KEYS = ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "seed",
-                         "patches", "spacing_m", "cloud_fill", "small_clouds", "raggedness")
+                         "patches", "spacing_m", "cloud_fill", "small_clouds", "raggedness", "towers")
 #: Genera drawn from simulated patches when any are installed.
 PATCH_GENERA = ("cumulus", "congestus")
 
@@ -561,9 +623,21 @@ def cloudscape_from_state(state: Any, build: bool = True):
         patch_fill=float(getattr(clouds, "cloud_fill", profile.patch_fill)),
         small_keep=float(getattr(clouds, "small_clouds", profile.small_keep)),
         patch_erosion=profile.patch_erosion * float(getattr(clouds, "raggedness", 1.0)))
+    towers = load_towers(getattr(clouds, "patches", "") or None) if patches else []
+    share = float(getattr(clouds, "towers", 0.0))
+    share = share if share > 0.0 else profile.towers
+    if towers and share > 0.0:
+        # The layer has to hold the tallest tower at the largest scale a cell allows.
+        height = max(q.density.shape[1] * q.voxel_m for q in towers)
+        widest = max(max(q.density.shape[0], q.density.shape[2]) * q.voxel_m for q in towers)
+        tallest = min(1.2, profile.patch_period_m / (PATCH_FOOTPRINT * widest)) * profile.patch_fill * height
+        profile = dataclasses.replace(profile, towers=min(share, 1.0),
+                                      thickness_m=max(profile.thickness_m, float(np.ceil(tallest / 100.0) * 100.0)))
+    else:
+        towers = []
     built = Cloudscape(cover=float(clouds.cover), base_m=float(base),
                        profile=profile, seed=int(clouds.seed),
-                       patches=patches or None)
+                       patches=patches or None, towers=towers or None)
     while len(_CACHE) >= 2:
         _CACHE.pop(next(iter(_CACHE)))
     _CACHE[key] = built

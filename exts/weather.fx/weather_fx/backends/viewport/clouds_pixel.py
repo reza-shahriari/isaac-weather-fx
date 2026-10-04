@@ -48,6 +48,12 @@ TEXTURE_NAME = "weather_fx_cloud_layer"
 EMISSIVE_PER_DOME = math.pi
 #: Where the quad sits, as a fraction of the camera's far clipping distance.
 QUAD_DEPTH = 0.9
+#: How much of the ground's upward light a full cover takes away.
+GROUND_SHADE = 0.8
+#: How much of the clear air's light in front of the cloud a full cover takes away (the sun's
+#: beam does not reach the air under a deck); it goes as the square of the cover, since under
+#: scattered cloud most of the air on a line of sight is still in the sun.
+AIR_SHADE = 0.85
 VEIL_PATH = LAYER_ROOT + "/Veil"
 VEIL_MATERIAL_PATH = LAYER_ROOT + "/VeilMaterial"
 VEIL_TEXTURE_NAME = "weather_fx_cloud_veil"
@@ -157,7 +163,8 @@ class CloudLayerEffect(Effect):
         key = (round(body.elevation_deg / TABLE_STEP_DEG), round(body.azimuth_deg / TABLE_STEP_DEG),
                body is conditions.sun, round(float(state.sky.turbidity), 3),
                repr(state.sky.ground_albedo), state.sky.model,
-               round(float(state.sky.exposure_scale), 4), round(height_m / 250.0))
+               round(float(state.sky.exposure_scale), 4), round(height_m / 250.0),
+               round(float(state.clouds.cover), 2))
         if key == self._tables_key:
             return
         from ...gpu import cloud_march
@@ -167,8 +174,12 @@ class CloudLayerEffect(Effect):
         light = layer_tables.lighting_for(conditions)
         self._tables = cloud_march.SkyTables(sky, air_in, air_tr, light["azimuth_rad"],
                                              layer_tables.AIR_NEAR_M, layer_tables.AIR_FAR_M, "cuda:0")
-        self._lighting = cloud_march.Lighting(light["sun_direction"], light["sun_rgb"],
-                                              light["above_rgb"], light["below_rgb"])
+        # The ground under the cloud is lit by what the cloud lets through: under an overcast it
+        # sends up a fraction of what it does under a clear sky, and the underside of the deck
+        # is grey, not the colour of sunlit ground.
+        shaded = 1.0 - GROUND_SHADE * min(max(float(state.clouds.cover), 0.0), 1.0)
+        self._lighting = cloud_march.Lighting(light["sun_direction"], light["sun_rgb"], light["above_rgb"],
+                                              tuple(float(v) * shaded for v in light["below_rgb"]))
         self._tables_key = key
         self._conditions = conditions
 
@@ -297,7 +308,8 @@ class CloudLayerEffect(Effect):
         layer = self._renderer.render_layer(
             view, self._lighting, self._tables, gains=gains, flip=False,
             density_scale=float(state.clouds.density_scale),
-            depth=depth, depth_scale=mpu, depth_max_m=0.8 * QUAD_DEPTH * float(clip[1]) * mpu)
+            depth=depth, depth_scale=mpu, depth_max_m=0.8 * QUAD_DEPTH * float(clip[1]) * mpu,
+            air_light=1.0 - AIR_SHADE * min(max(float(state.clouds.cover), 0.0), 1.0) ** 2)
         veil = self._renderer.veil
 
         import omni.ui as ui

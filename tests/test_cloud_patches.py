@@ -166,3 +166,37 @@ def test_the_veil_is_the_cloud_in_front_of_a_surface() -> None:
     cloudy = transmittance < 0.5
     assert cloudy.mean() > 0.05
     assert np.allclose(opacity, np.minimum(1.0 - transmittance, 0.995), atol=1e-5)
+
+
+@pytest.mark.skipif(not __import__("weather_fx.gpu", fromlist=["warp_available"]).warp_available(),
+                    reason="no Warp")
+def test_towers_stand_among_the_cumulus_and_the_gpu_places_them_too(patches) -> None:
+    """With towers in half of the large clouds' cells there is cloud above anything a cumulus
+    patch can reach, none without them, and the kernel's density is still the reference's."""
+    import dataclasses
+
+    from weather_fx.gpu import cloud_march
+
+    if cloud_march.wp.get_cuda_device_count() == 0:
+        pytest.skip("no CUDA device")
+    # A blob three times as tall as it was made: lumps 1.5 to 3 km high.
+    towers = [C.CloudPatch(q.name, np.repeat(q.density, 3, axis=1), q.voxel_m)
+              for q in (_blob_patch("t1", 7, shape=(30, 24, 30)), _blob_patch("t2", 8, shape=(28, 24, 32)))]
+    profile = dataclasses.replace(C.CLOUDSCAPE_TYPES["cumulus"], towers=0.5, thickness_m=3600.0)
+    mixed = C.Cloudscape(cover=0.3, base_m=1200.0, profile=profile, seed=5, patches=patches, towers=towers, **SMALL)
+    plain = C.Cloudscape(cover=0.3, base_m=1200.0, profile=dataclasses.replace(profile, towers=0.0), seed=5,
+                         patches=patches, towers=towers, **SMALL)
+    rng = np.random.default_rng(11)
+    n = 40_000
+    x = rng.uniform(-30_000.0, 30_000.0, n)
+    z = rng.uniform(-30_000.0, 30_000.0, n)
+    y = rng.uniform(mixed.base_m, mixed.top_m, n)
+    ref = mixed.density(x, y, z)
+    # A cumulus box is 1200 m tall and never scaled past 1.2: above that, only a tower.
+    high = y > mixed.base_m + 1.2 * mixed.patch_size_m[1] + 50.0
+    assert (ref[high] > 0.0).any()
+    assert not (plain.density(x, y, z)[high] > 0.0).any()
+    gpu = cloud_march.CloudRenderer(mixed, device="cuda:0").density(x, y, z)
+    error = np.abs(gpu - ref)
+    assert error.max() < 0.05
+    assert error.mean() < 1e-3

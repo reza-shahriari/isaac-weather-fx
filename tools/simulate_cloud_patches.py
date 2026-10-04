@@ -40,6 +40,7 @@ UNIT_M = 100.0
 CONDENSATION = 0.3
 #: A patch's base is the lowest level where its cloud covers this share of its widest level.
 BASE_AREA = 0.9
+TOWER_BASE_AREA = 0.3
 
 argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -184,7 +185,8 @@ def flat_base(values: np.ndarray) -> np.ndarray:
     """
     solid = values > 0.15 * values.max()
     area = solid.sum(axis=(0, 2)).astype(np.float64)
-    level = int(np.argmax(area >= BASE_AREA * area.max()))
+    # A tower is widest at its head: its base is where the column under it is first a column.
+    level = int(np.argmax(area >= (TOWER_BASE_AREA if a.tower else BASE_AREA) * area.max()))
     return values[:, level:, :]
 
 

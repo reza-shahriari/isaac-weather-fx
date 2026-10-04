@@ -22,15 +22,83 @@ Frame: metres, +Y up, the observer's column at x = z = 0, as :class:`~weather_fx
 """
 from __future__ import annotations
 
+import pathlib
 from dataclasses import dataclass, field
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from . import clouds as _clouds
 
 __all__ = ["CloudscapeProfile", "CLOUDSCAPE_TYPES", "Cloudscape", "sample_wrapped",
-           "CLOUDSCAPE_SHAPE_KEYS", "cloudscape_from_state", "supports"]
+           "CLOUDSCAPE_SHAPE_KEYS", "cloudscape_from_state", "supports", "CloudPatch", "load_patches",
+           "PATCH_DIRECTORIES"]
+
+#: Where simulated cloud patches are looked for: the ones shipped with the extension, then the
+#: ones ``tools/simulate_cloud_patches.py`` wrote for this user.
+PATCH_DIRECTORIES = (pathlib.Path(__file__).resolve().parents[1] / "data" / "cloud_patches",
+                     pathlib.Path.home() / ".cache" / "weather_fx" / "cloud_patches")
+#: Empty margin each patch keeps on either side along the atlas's x axis, as a fraction of its
+#: slot, so linear filtering never mixes two patches.
+ATLAS_MARGIN = 0.02
+#: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
+EROSION_TILE_M = 230.0
+
+
+@dataclass(frozen=True)
+class CloudPatch:
+    """One simulated patch of cloud: density 0..1 on cubic cells, axis 1 up, base at index 0."""
+
+    name: str
+    density: np.ndarray
+    voxel_m: float
+
+
+def load_patches(directory: Any = None) -> List[CloudPatch]:
+    """The patches in a directory (``*.npz`` from ``tools/simulate_cloud_patches.py``), by name;
+    with no directory, every one in :data:`PATCH_DIRECTORIES`. An empty list if there are none."""
+    directories = [pathlib.Path(directory).expanduser()] if directory else list(PATCH_DIRECTORIES)
+    found: Dict[str, CloudPatch] = {}
+    for folder in directories:
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob("*.npz")):
+            with np.load(path) as data:
+                density = np.asarray(data["density"], dtype=np.float32)
+                found[path.stem] = CloudPatch(path.stem, density / max(float(density.max()), 1e-9),
+                                              float(data["voxel_m"]))
+    return [found[name] for name in sorted(found)]
+
+
+def _cell_hash(i: np.ndarray, j: np.ndarray, k: int) -> np.ndarray:
+    """``gpu.cloud_march.cell_hash``: a number in 0..1 per lattice cell and channel."""
+    with np.errstate(over="ignore"):
+        i = np.asarray(i).astype(np.int64).astype(np.uint32)
+        j = np.asarray(j).astype(np.int64).astype(np.uint32)
+        n = i * np.uint32(73856093) ^ j * np.uint32(19349663) ^ np.uint32(k) * np.uint32(83492791)
+        n = (n << np.uint32(13)) ^ n
+        n = n * (n * n * np.uint32(15731) + np.uint32(789221)) + np.uint32(1376312589)
+    return (n & np.uint32(0x7FFFFFFF)).astype(np.float64) / 2147483648.0
+
+
+def _sample_clamped(texture: np.ndarray, u: np.ndarray, v: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Linear interpolation of a 3-D texture indexed ``[w, v, u]``, clamped at its edges."""
+    out = 0.0
+    index, weight = [], []
+    for c, n in ((u, texture.shape[2]), (v, texture.shape[1]), (w, texture.shape[0])):
+        f = np.clip(np.asarray(c, dtype=np.float64) * n - 0.5, 0.0, n - 1.0)
+        i0 = np.minimum(np.floor(f).astype(np.int64), n - 2) if n > 1 else np.zeros(np.shape(f), np.int64)
+        index.append((i0, np.minimum(i0 + 1, n - 1)))
+        weight.append(f - i0)
+    for corner in range(8):
+        wgt = 1.0
+        key = []
+        for axis in range(3):
+            bit = (corner >> axis) & 1
+            wgt = wgt * (weight[axis] if bit else 1.0 - weight[axis])
+            key.append(index[axis][bit])
+        out = out + texture[key[2], key[1], key[0]] * wgt
+    return out
 
 
 @dataclass(frozen=True)
@@ -65,6 +133,10 @@ class CloudscapeProfile:
     edge_top: float = 40.0
     crisp_from: float = 0.1
     crisp_to: float = 0.55
+    #: Simulated patches: the lattice's cell, metres (one patch, a group of clouds, per cell), and
+    #: how much of a patch's density the small noise can eat at its base.
+    patch_period_m: float = 2600.0
+    patch_erosion: float = 0.5
     #: Liquid water at the base as a fraction of the top's. Lifted air condenses more the higher
     #: it goes (the adiabat), so a cloud is thin and grey at its base and dense at its top.
     water_base: float = 0.25
@@ -93,6 +165,15 @@ CLOUDSCAPE_TYPES: Dict[str, CloudscapeProfile] = {
 #: Vertical optical depth above which a column counts toward the cover: a seventh of the light
 #: from behind it gets through, and the sky's blue no longer shows.
 CLOUDY_OPTICAL_DEPTH = 2.0
+#: The same for simulated patches. Their thin, eroded parts are plainly cloud to an observer
+#: (a third of the sky's light is already scattered at 0.4), and counting only the opaque cores
+#: filled the sky with twice the cloud asked for.
+PATCH_CLOUDY_OPTICAL_DEPTH = 0.4
+#: Cover is the fraction of the sky an observer on the ground sees obscured, and a cumulus hides
+#: sky with its sides as well as its base. The solve counts columns seen from straight below, so
+#: for patches it aims at this fraction of the cover asked for. Measured on the look sheet's four
+#: headings (22 degrees up, 60 degree lens): cover 0.35 leaves 0.3-0.4 of the pixels cloudy.
+PATCH_PLAN_VIEW_FRACTION = 0.5
 
 
 def sample_wrapped(texture: np.ndarray, *coords: Any) -> np.ndarray:
@@ -155,6 +236,14 @@ class Cloudscape:
     detail: np.ndarray = field(init=False, repr=False)
     #: The coverage bias the cover solve found (see :meth:`_solve_cover`).
     coverage_bias: float = field(init=False, default=0.0)
+    #: Simulated patches of cloud. With any, they are the cloud: the weather map says which
+    #: lattice cells hold one, and the noise function is not used. ``None`` or empty: the function.
+    patches: Optional[List[CloudPatch]] = None
+    #: (nz, ny, slots * nx) float32: the patches side by side, indexed ``[w, v, u]``.
+    patch_atlas: Optional[np.ndarray] = field(init=False, default=None, repr=False)
+    #: How full the two lattices of patches are, 0..2, as the cover solve found.
+    patch_cover: float = field(init=False, default=0.0)
+    patch_size_m: Tuple[float, float, float] = field(init=False, default=(1.0, 1.0, 1.0))
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.cover <= 1.0:
@@ -198,7 +287,27 @@ class Cloudscape:
         dv = p.detail_tile_m / k
         self.detail = _clouds._worley_fbm(
             (k, k, k), (dv, dv, dv), p.detail_tile_m / 4.0, self.seed + 7907).astype(np.float32)
+        if self.patches:
+            self._build_atlas()
         self.coverage_bias = self._solve_cover()
+
+    def _build_atlas(self) -> None:
+        patches = self.patches or []
+        voxel = float(patches[0].voxel_m)
+        nx = max(q.density.shape[0] for q in patches)
+        ny = max(q.density.shape[1] for q in patches)
+        nz = max(q.density.shape[2] for q in patches)
+        slot = int(round(nx / (1.0 - 2.0 * ATLAS_MARGIN)))
+        atlas = np.zeros((slot * len(patches), ny, nz), dtype=np.float32)
+        for k, q in enumerate(patches):
+            if abs(q.voxel_m - voxel) > 1e-3 * voxel:
+                raise ValueError("cloud patches must share one voxel size")
+            sx, sy, sz = q.density.shape
+            x0 = k * slot + (slot - sx) // 2
+            z0 = (nz - sz) // 2
+            atlas[x0:x0 + sx, :sy, z0:z0 + sz] = q.density
+        self.patch_atlas = np.ascontiguousarray(atlas.transpose(2, 1, 0))
+        self.patch_size_m = (nx * voxel, ny * voxel, nz * voxel)
 
     def _solve_cover(self) -> float:
         """The coverage bias at which the fraction of cloudy columns is the cover asked for.
@@ -209,18 +318,27 @@ class Cloudscape:
         """
         if self.cover <= 0.0:
             return -1.0
-        n = 160
+        n = 112 if self.patches else 160
         axis = (np.arange(n) + 0.5) / n * self.weather_tile_m
         x, z = np.meshgrid(axis, axis, indexing="xy")
-        lo, hi = -1.0, 1.0
+        lo, hi = (0.0, 2.0) if self.patches else (-1.0, 1.0)
+        target = self.cover * (PATCH_PLAN_VIEW_FRACTION if self.patches else 1.0)
         for _ in range(14):
             mid = 0.5 * (lo + hi)
-            cloudy = self._column_optical_depth(x, z, mid, 14) > CLOUDY_OPTICAL_DEPTH
-            if float(cloudy.mean()) < self.cover:
+            cloudy = self._column_optical_depth(x, z, mid, 14) > self._cloudy_optical_depth
+            if float(cloudy.mean()) < target:
                 lo = mid
             else:
                 hi = mid
+        if self.patches:
+            # With patches the unknown is how full the two lattices are, 0..2.
+            self.patch_cover = 0.5 * (lo + hi)
+            return 0.0
         return 0.5 * (lo + hi)
+
+    @property
+    def _cloudy_optical_depth(self) -> float:
+        return PATCH_CLOUDY_OPTICAL_DEPTH if self.patches else CLOUDY_OPTICAL_DEPTH
 
     def _column_optical_depth(self, x: np.ndarray, z: np.ndarray, bias: float, levels: int) -> np.ndarray:
         """Visible optical depth straight up through the layer, by the midpoint rule."""
@@ -244,10 +362,13 @@ class Cloudscape:
         """Normalised density 0..1 at a position; multiply by :attr:`extinction_per_m`."""
         if self.cover <= 0.0:
             return np.zeros(np.broadcast(x_m, y_m, z_m).shape)
-        return self._density(x_m, y_m, z_m, self.coverage_bias)
+        return self._density(x_m, y_m, z_m, self.patch_cover if self.patches else self.coverage_bias)
 
     def _density(self, x_m: Any, y_m: Any, z_m: Any, bias: float) -> np.ndarray:
-        """The arithmetic the GPU kernel repeats (``gpu/cloud_march.py::cloud_density``)."""
+        """The arithmetic the GPU kernel repeats (``gpu/cloud_march.py::cloud_density``).
+        ``bias`` is the coverage bias for the function, the fraction of cells for patches."""
+        if self.patches:
+            return self._patch_density(x_m, y_m, z_m, bias)
         p = self.profile
         x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x_m, y_m, z_m)))
         h = (y - self.base_m) / p.thickness_m
@@ -277,7 +398,56 @@ class Cloudscape:
         water = p.water_base + (1.0 - p.water_base) * np.clip(h, 0.0, 1.0) ** (2.0 / 3.0)
         return np.where(inside, edge * water, 0.0)
 
-    def kernel_constants(self) -> Dict[str, float]:
+    def _patch_density(self, x_m: Any, y_m: Any, z_m: Any, cover: float) -> np.ndarray:
+        """``gpu/cloud_march.py::patch_density``, line for line. Two lattices, the second offset
+        by half a cell and filled only once the first is full (``cover`` runs 0..2)."""
+        first = self._lattice_density(x_m, y_m, z_m, min(cover, 1.0), 0)
+        if cover <= 1.0:
+            return first
+        return np.maximum(first, self._lattice_density(x_m, y_m, z_m, cover - 1.0, 1))
+
+    def _lattice_density(self, x_m: Any, y_m: Any, z_m: Any, cover: float, lattice: int) -> np.ndarray:
+        p = self.profile
+        x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x_m, y_m, z_m)))
+        h = (y - self.base_m) / p.thickness_m
+        period = p.patch_period_m
+        sx, sy, sz = self.patch_size_m
+        count = len(self.patches or [])
+        shift = 0.5 * period * lattice
+        channel = 10 * lattice
+        cx = np.floor((x - shift) / period)
+        cz = np.floor((z - shift) / period)
+        mx = (cx + 0.5) * period + shift
+        mz = (cz + 0.5) * period + shift
+        wc = sample_wrapped(self.weather, mx / self.weather_tile_m, mz / self.weather_tile_m)[..., 0]
+        rank = (wc - (1.0 - cover)) / max(cover, 1.0e-3)
+        present = rank > 0.0
+        scale = (0.45 + 0.55 * np.sqrt(np.clip(rank, 0.0, None))) * (0.8 + 0.4 * _cell_hash(cx, cz, 2 + channel))
+        scale = np.minimum(scale, period / (0.8 * max(sx, sz)))
+        slack = np.maximum(period - scale * 0.8 * max(sx, sz), 0.0)
+        lx = x - mx - (_cell_hash(cx, cz, 3 + channel) - 0.5) * slack
+        lz = z - mz - (_cell_hash(cx, cz, 4 + channel) - 0.5) * slack
+        angle = 6.2831853 * _cell_hash(cx, cz, 5 + channel)
+        ca, sa = np.cos(angle), np.sin(angle)
+        u = (ca * lx + sa * lz) / (scale * sx) + 0.5
+        v = (y - self.base_m) / (scale * sy)
+        w = (-sa * lx + ca * lz) / (scale * sz) + 0.5
+        inside = present & (h > 0.0) & (h < 1.0) & (u > 0.0) & (u < 1.0) & (v > 0.0) & (v < 1.0) & (w > 0.0) & (w < 1.0)
+        which = np.minimum((_cell_hash(cx, cz, 6 + channel) * count).astype(np.int64), count - 1)
+        d = _sample_clamped(self.patch_atlas, (which + ATLAS_MARGIN + (1.0 - 2.0 * ATLAS_MARGIN) * np.clip(u, 0.0, 1.0)) / count,
+                            np.clip(v, 0.0, 1.0), np.clip(w, 0.0, 1.0))
+        d = d * _smoothstep(0.0, 0.08, np.minimum(np.minimum(u, 1.0 - u), np.minimum(w, 1.0 - w)))
+        d = d * _smoothstep(0.0, 0.06, 0.5 - np.maximum(np.abs(x - mx), np.abs(z - mz)) / period)
+        t = EROSION_TILE_M
+        e1 = sample_wrapped(self.detail, x / t, y / t, z / t)
+        f = t / 4.0
+        e2 = sample_wrapped(self.detail, x / f + 0.37, y / f + 0.11, z / f + 0.73)
+        noise = 0.65 * e1 + 0.35 * e2
+        strength = p.patch_erosion * (1.0 - 0.55 * np.clip(v * 1.4, 0.0, 1.0))
+        eroded = _remap(d, noise * strength, 1.0) if p.patch_erosion > 0.0 else d
+        return np.where(inside & (d > 0.0), eroded, 0.0)
+
+    def kernel_constants(self) -> Dict[str, Any]:
         """Every scalar the GPU kernel needs, by the names its struct uses."""
         p = self.profile
         return dict(
@@ -287,7 +457,11 @@ class Cloudscape:
             top_min=float(p.top_min), top_max=float(p.top_max), taper=float(p.taper),
             erosion=float(p.erosion), edge_base=float(p.edge_base), edge_top=float(p.edge_top),
             crisp_from=float(p.crisp_from), crisp_to=float(p.crisp_to),
-            water_base=float(p.water_base), extinction_per_m=float(p.extinction_per_m))
+            water_base=float(p.water_base), extinction_per_m=float(p.extinction_per_m),
+            patch_on=1 if self.patches else 0, patch_count=len(self.patches or []),
+            patch_size=tuple(float(v) for v in self.patch_size_m),
+            patch_period_m=float(p.patch_period_m), patch_cover=float(self.patch_cover),
+            patch_erosion=float(p.patch_erosion))
 
     def measured_cover(self, columns: int = 256) -> float:
         """Fraction of columns holding cloud a camera cannot see through, on a fresh lattice."""
@@ -295,7 +469,8 @@ class Cloudscape:
             return 0.0
         axis = (np.arange(columns) + 0.25) / columns * self.weather_tile_m
         x, z = np.meshgrid(axis, axis, indexing="xy")
-        return float((self._column_optical_depth(x, z, self.coverage_bias, 20) > CLOUDY_OPTICAL_DEPTH).mean())
+        bias = self.patch_cover if self.patches else self.coverage_bias
+        return float((self._column_optical_depth(x, z, bias, 20) > self._cloudy_optical_depth).mean())
 
     def optical_depth_toward(self, origin_m: Any, direction: Any, samples: int = 96) -> float:
         """Visible optical depth from a point through the layer along a direction (flat slab)."""
@@ -315,7 +490,10 @@ class Cloudscape:
 
 
 #: The cloud parameters a cloudscape's textures depend on.
-CLOUDSCAPE_SHAPE_KEYS = ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "seed")
+CLOUDSCAPE_SHAPE_KEYS = ("enabled", "cover", "genus", "base_m", "temperature_c", "dewpoint_c", "seed",
+                         "patches")
+#: Genera drawn from simulated patches when any are installed.
+PATCH_GENERA = ("cumulus", "congestus")
 
 _CACHE: Dict[Tuple[Any, ...], "Cloudscape"] = {}
 
@@ -341,8 +519,13 @@ def cloudscape_from_state(state: Any, build: bool = True):
     base = clouds.base_m
     if base <= 0.0:
         base = _clouds.lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
+    # Simulated patches are cumulus; the sheet genera stay the function.
+    patches = load_patches(getattr(clouds, "patches", "") or None) if clouds.genus in PATCH_GENERA else []
+    if getattr(clouds, "patches", "") == "none":
+        patches = []
     built = Cloudscape(cover=float(clouds.cover), base_m=float(base),
-                       profile=CLOUDSCAPE_TYPES[clouds.genus], seed=int(clouds.seed))
+                       profile=CLOUDSCAPE_TYPES[clouds.genus], seed=int(clouds.seed),
+                       patches=patches or None)
     while len(_CACHE) >= 2:
         _CACHE.pop(next(iter(_CACHE)))
     _CACHE[key] = built

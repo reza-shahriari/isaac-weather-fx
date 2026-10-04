@@ -40,6 +40,8 @@ parser.add_argument("--resolution", type=int, nargs=2, default=(1280, 720))
 parser.add_argument("--genus", default="cumulus")
 parser.add_argument("--cover", type=float, default=0.35)
 parser.add_argument("--seed", type=int, default=3)
+parser.add_argument("--patches", default="", help="a folder of cloud patches, or none for the noise function")
+parser.add_argument("--layer-scale", type=float, default=0.75)
 parser.add_argument("--views", nargs="*", default=[v[0] for v in VIEWS])
 parser.add_argument("--rt-subframes", type=int, default=8)
 parser.add_argument("--pt-subframes", type=int, default=48)
@@ -99,7 +101,8 @@ wx.set_site(48.14, 11.58)
 wx.set_time(date_utc="2024-06-21")
 wx.configure(sky={"enabled": True, "hour_utc": VIEWS[0][1]},
              clouds={"enabled": True, "render_path": "pixel", "cover": args.cover,
-                     "genus": args.genus, "seed": args.seed})
+                     "genus": args.genus, "seed": args.seed, "patches": args.patches,
+                     "layer_scale": args.layer_scale})
 
 camera = UsdGeom.Camera(stage.GetPrimAtPath(SKY_CAMERA))
 
@@ -125,6 +128,26 @@ report = {"args": vars(args), "views": [list(v) for v in views]}
 aim(views[0][2], views[0][3], views[0][4])
 pump(30)
 
+def time_real_time() -> None:
+    """Frame times in Real-Time, the camera turning so every frame is a new march. Run before
+    the path tracer has been on: Real-Time is slower for a while after it."""
+    wx.set_time(hour_utc=views[0][1])
+    pump(20)
+    layer_ms, count = [], 90
+    start = time.perf_counter()
+    for k in range(count):
+        aim(4.0 * k, 22.0)
+        wx.step(1.0 / 60.0)
+        simulation_app.update()
+        layer_ms.append(wx.stats().get("viewport", {}).get("cloud_layer", {}).get("frame_ms", 0.0))
+    elapsed = time.perf_counter() - start
+    report["timing"] = {"frames": count, "app_update_ms": round(1000.0 * elapsed / count, 2),
+                        "fps": round(count / elapsed, 1),
+                        "cloud_layer_ms_median": round(float(np.median(layer_ms)), 2),
+                        "cloud_layer_ms_p95": round(float(np.percentile(layer_ms, 95)), 2)}
+    print("[look]", json.dumps(report["timing"]), flush=True)
+
+
 frames = {}
 for mode, tag, title, subframes in modes:
     settings.set("/rtx/rendermode", mode)
@@ -143,6 +166,8 @@ for mode, tag, title, subframes in modes:
         Image.fromarray(image).save(path)
         frames[(tag, name)] = (image, f"{title}  {name}  {view_hour:g} h UTC")
         print(f"[look] wrote {path}", flush=True)
+    if tag == "rt" and not args.skip_timing:
+        time_real_time()
 
 # One sheet: a row per render mode, a column per view, each cell labelled.
 cell_w = 640
@@ -162,23 +187,6 @@ sheet_path = os.path.join(args.out, "sheet.jpg")
 sheet.save(sheet_path, quality=90)
 print(f"[look] wrote {sheet_path}", flush=True)
 
-if not args.skip_timing:
-    settings.set("/rtx/rendermode", "RaytracedLighting")
-    wx.set_time(hour_utc=views[0][1])
-    pump(20)
-    layer_ms, count = [], 90
-    start = time.perf_counter()
-    for k in range(count):
-        aim(4.0 * k, 22.0)
-        wx.step(1.0 / 60.0)
-        simulation_app.update()
-        layer_ms.append(wx.stats().get("viewport", {}).get("cloud_layer", {}).get("frame_ms", 0.0))
-    elapsed = time.perf_counter() - start
-    report["timing"] = {"frames": count, "app_update_ms": round(1000.0 * elapsed / count, 2),
-                        "fps": round(count / elapsed, 1),
-                        "cloud_layer_ms_median": round(float(np.median(layer_ms)), 2),
-                        "cloud_layer_ms_p95": round(float(np.percentile(layer_ms, 95)), 2)}
-    print("[look]", json.dumps(report["timing"]), flush=True)
 report["layer"] = wx.stats().get("viewport", {}).get("cloud_layer")
 
 with open(os.path.join(args.out, "report.json"), "w", encoding="utf-8") as handle:

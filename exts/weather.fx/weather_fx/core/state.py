@@ -204,7 +204,12 @@ class CloudParams:
                                      "both render modes (cumulus, congestus, stratocumulus, "
                                      "stratus). auto: 3D volumes under the path tracer, painted "
                                      "into the sky dome under real-time. volume / dome force one.")
-    layer_scale: float = param(1.0, "Pixel layer scale", min=0.25, max=1.0, advanced=True,
+    patches: str = param("", "Cloud patches", advanced=True,
+                         tooltip="Folder of simulated cloud patches (tools/simulate_cloud_patches.py) "
+                                 "the per-pixel cumulus is built from. Empty: the ones shipped with "
+                                 "the extension and in ~/.cache/weather_fx/cloud_patches. 'none': the "
+                                 "noise function.")
+    layer_scale: float = param(0.75, "Pixel layer scale", min=0.25, max=1.0, advanced=True,
                                tooltip="Resolution of the per-pixel cloud layer as a fraction "
                                        "of the viewport's. Lower is faster and softer.")
     lit_color: Vec3 = param((1.0, 1.0, 1.0), "Lit color", min=0.0, max=1.0, widget="color",

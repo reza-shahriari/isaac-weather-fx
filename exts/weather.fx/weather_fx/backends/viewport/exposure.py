@@ -23,8 +23,8 @@ log = logging.getLogger("weather_fx")
 
 HISTOGRAM_SETTING = "/rtx/post/histogram/enabled"
 WHITE_SCALE_SETTING = "/rtx/post/histogram/whiteScale"
-#: RTX's default is 10. At 5 the brightest sunlit cloud of a midday sky sits near 220 of 255.
-WHITE_SCALE = 5.0
+#: RTX's default is 10. At 7 a sunlit cloud keeps its shading below white and the sky is a deep daylight blue.
+WHITE_SCALE = 7.0
 
 
 class RealTimeExposureEffect(Effect):

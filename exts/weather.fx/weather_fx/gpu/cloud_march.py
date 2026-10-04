@@ -7,7 +7,7 @@ cloud, the step scatters:
 
 * **sunlight**, scattered once (the phase function times the beam that reached the point) and
   many times (octaves of that term, each dimmer, less shadowed and less directional: Wrenninge
-  et al. 2013, Hillaire 2016), the optical depth toward the sun read on eight jittered samples
+  et al. 2013, Hillaire 2016), the optical depth toward the sun read on six jittered samples
   spaced as the square of their index;
 * **sky light and ground light**, the clear sky's hemisphere means from above and from below,
   mixed by the two-stream diffuse transmittance of the cloud above and below the point (the
@@ -48,6 +48,8 @@ FINE_STEP = 0.3
 #: stops light within ten metres, and a step that long would put the whole pixel's light at one
 #: random depth under the surface (grain). Nor is a step shorter than a pixel's footprint.
 SKIN_STEP = 0.8
+#: Share of a pixel's light below which a sample reuses the last lit sample's lighting.
+RELIGHT_WEIGHT = 0.005
 #: Two-stream diffuse transmittance through optical depth tau: ``1 / (1 + 0.75 (1 - g) tau)``.
 DIFFUSE_K = 0.75 * (1.0 - CLOUD_G)
 
@@ -123,6 +125,16 @@ class Layer:
     crisp_to: float
     water_base: float
     extinction_per_m: float
+    #: 1: the cloud is simulated patches (``core.cloudscape``), one per cell of a lattice
+    #: ``patch_period_m`` wide, its box ``patch_size`` metres standing on the base.
+    patch_on: int
+    patch_size: wp.vec3
+    patch_period_m: float
+    patch_cover: float
+    #: Volumes side by side along the texture's u axis, one picked per cell.
+    patch_count: int
+    #: How much of the density the small noise can eat at the base, 0..1.
+    patch_erosion: float
 
 
 @wp.struct
@@ -157,15 +169,96 @@ def remap01(v: float, lo: float, hi: float) -> float:
     return wp.clamp((v - lo) / wp.max(hi - lo, 1.0e-4), 0.0, 1.0)
 
 
+#: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
+EROSION_TILE_M = 230.0
+
+
+@wp.func
+def cell_hash(i: int, j: int, k: int) -> float:
+    n = wp.uint32(i) * wp.uint32(73856093) ^ wp.uint32(j) * wp.uint32(19349663) ^ wp.uint32(k) * wp.uint32(83492791)
+    n = (n << wp.uint32(13)) ^ n
+    n = n * (n * n * wp.uint32(15731) + wp.uint32(789221)) + wp.uint32(1376312589)
+    return float(n & wp.uint32(0x7FFFFFFF)) / 2147483648.0
+
+
+@wp.func
+def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, erode: int, L: Layer,
+                    weather: wp.Texture2D, detail: wp.Texture3D, patches: wp.Texture3D) -> float:
+    """``Cloudscape._lattice_density``, line for line: a simulated patch in each lattice cell the
+    weather map keeps, moved, turned and scaled by the cell's hash, standing on the base."""
+    period = L.patch_period_m
+    shift = 0.5 * period * float(lattice)
+    channel = 10 * lattice
+    cx = int(wp.floor((x - shift) / period))
+    cz = int(wp.floor((z - shift) / period))
+    mx = (float(cx) + 0.5) * period + shift
+    mz = (float(cz) + 0.5) * period + shift
+    # Which cells hold cloud comes from the weather map (its coverage is uniform over 0..1 and
+    # smooth over kilometres), so clouds gather in groups with clear lanes between them, and
+    # the cells deepest inside a group hold the largest clouds.
+    wc = wp.texture_sample(weather, wp.vec2f(mx / L.weather_tile_m, mz / L.weather_tile_m), dtype=wp.vec2f)
+    rank = (wc[0] - (1.0 - cover)) / wp.max(cover, 1.0e-3)
+    if rank <= 0.0:
+        return 0.0
+    widest = wp.max(L.patch_size[0], L.patch_size[2])
+    scale = (0.45 + 0.55 * wp.sqrt(rank)) * (0.8 + 0.4 * cell_hash(cx, cz, 2 + channel))
+    scale = wp.min(scale, period / (0.8 * widest))
+    # The cloud sits inside its box, so the box may reach a little past its cell.
+    slack = wp.max(period - scale * 0.8 * widest, 0.0)
+    lx = x - mx - (cell_hash(cx, cz, 3 + channel) - 0.5) * slack
+    lz = z - mz - (cell_hash(cx, cz, 4 + channel) - 0.5) * slack
+    angle = 6.2831853 * cell_hash(cx, cz, 5 + channel)
+    ca = wp.cos(angle)
+    sa = wp.sin(angle)
+    u = (ca * lx + sa * lz) / (scale * L.patch_size[0]) + 0.5
+    v = (y - L.base_m) / (scale * L.patch_size[1])
+    w = (-sa * lx + ca * lz) / (scale * L.patch_size[2]) + 0.5
+    if u <= 0.0 or u >= 1.0 or v <= 0.0 or v >= 1.0 or w <= 0.0 or w >= 1.0:
+        return 0.0
+    which = wp.min(int(cell_hash(cx, cz, 6 + channel) * float(L.patch_count)), L.patch_count - 1)
+    # Each patch keeps an empty margin in the atlas, so linear filtering never mixes two.
+    d = wp.texture_sample(patches, wp.vec3f((float(which) + 0.02 + 0.96 * u) / float(L.patch_count), v, w), dtype=float)
+    # A cloud the simulation's wind pushed against its domain's wall thins out toward the box's
+    # side, not into a flat cut.
+    d = d * smoothstep(0.0, 0.08, wp.min(wp.min(u, 1.0 - u), wp.min(w, 1.0 - w)))
+    # Nor is a box that reaches past its cell cut at the cell's edge.
+    ex = wp.abs(x - mx) / period
+    ez = wp.abs(z - mz) / period
+    d = d * smoothstep(0.0, 0.06, 0.5 - wp.max(ex, ez))
+    if d <= 0.0 or L.patch_erosion <= 0.0 or erode == 0:
+        return d
+    # The solver's cells are ten metres and its outline is clean. Two scales of small noise eat
+    # the thin part of the cloud (its skin), most at the base and the low flanks where a real
+    # cloud evaporates into wisps, least on the rising top.
+    e1 = wp.texture_sample(detail, wp.vec3f(x / EROSION_TILE_M, y / EROSION_TILE_M, z / EROSION_TILE_M), dtype=float)
+    f = EROSION_TILE_M / 4.0
+    e2 = wp.texture_sample(detail, wp.vec3f(x / f + 0.37, y / f + 0.11, z / f + 0.73), dtype=float)
+    noise = 0.65 * e1 + 0.35 * e2
+    strength = L.patch_erosion * (1.0 - 0.55 * wp.clamp(v * 1.4, 0.0, 1.0))
+    return remap01(d, noise * strength, 1.0)
+
+
+@wp.func
+def patch_density(x: float, y: float, z: float, erode: int, L: Layer, weather: wp.Texture2D, detail: wp.Texture3D,
+                  patches: wp.Texture3D) -> float:
+    """``Cloudscape._patch_density``: two lattices, the second filled once the first is full."""
+    first = lattice_density(x, y, z, wp.min(L.patch_cover, 1.0), 0, erode, L, weather, detail, patches)
+    if L.patch_cover <= 1.0:
+        return first
+    return wp.max(first, lattice_density(x, y, z, L.patch_cover - 1.0, 1, erode, L, weather, detail, patches))
+
+
 @wp.func
 def cloud_density(
     x: float, y: float, z: float, L: Layer,
-    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D,
+    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D,
 ) -> float:
     """``Cloudscape._density``, line for line."""
     h = (y - L.base_m) / L.thickness_m
     if h <= 0.0 or h >= 1.0:
         return 0.0
+    if L.patch_on != 0:
+        return patch_density(x, y, z, 1, L, weather, detail, patches)
     w = wp.texture_sample(weather, wp.vec2f(x / L.weather_tile_m, z / L.weather_tile_m), dtype=wp.vec2f)
     coverage = wp.clamp(w[0] + L.coverage_bias, 0.0, 1.0)
     if coverage <= 0.0:
@@ -233,27 +326,42 @@ def phase(cos_theta: float, g: float) -> float:
     return (1.0 - BACK_LOBE) * henyey_greenstein(cos_theta, g) + BACK_LOBE * henyey_greenstein(cos_theta, -0.3 * g)
 
 
+@wp.func
+def light_density(
+    x: float, y: float, z: float, L: Layer,
+    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D,
+) -> float:
+    """The density a light sample reads: for patches, without the small noise on the skin (it
+    changes how a wisp looks, hardly how much light the cloud behind it stops)."""
+    if L.patch_on != 0:
+        h = (y - L.base_m) / L.thickness_m
+        if h <= 0.0 or h >= 1.0:
+            return 0.0
+        return patch_density(x, y, z, 0, L, weather, detail, patches)
+    return cloud_density(x, y, z, L, weather, shape, detail, patches)
+
+
 #: Samples toward the sun and the reach they cover, metres. They are spaced as the square of
 #: their index, so the first is a few metres from the point (a lobe shading its own flank) and
 #: the last hundreds (the cloud behind shading the base).
-SUN_SAMPLES = 8
+SUN_SAMPLES = 6
 SUN_REACH_M = 2400.0
 #: Samples straight up and down for the sky's and the ground's light.
-COLUMN_SAMPLES = 3
+COLUMN_SAMPLES = 2
 #: Multiple scattering as octaves (Wrenninge, Kulla and Lundqvist 2013; Hillaire 2016): octave k
 #: carries ``MS_ENERGY**k`` of the light, sees ``MS_SHADOW**k`` of the optical depth toward the
 #: sun, and its phase function is ``MS_PHASE**k`` of the way from isotropic to the droplets'.
-#: With five octaves a thick cloud's sunlit face returns about half of a white ground's radiance.
+#: With five octaves a thick cloud's sunlit face returns about 0.4 of a white ground's radiance.
 MS_OCTAVES = 5
-MS_ENERGY = 0.7
-MS_SHADOW = 0.45
+MS_ENERGY = 0.6
+MS_SHADOW = 0.5
 MS_PHASE = 0.5
 
 
 @wp.func
 def sun_optical_depth(
     p: wp.vec3, sun: wp.vec3, jitter: float, L: Layer,
-    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D,
+    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D,
 ) -> float:
     """Optical depth toward the sun: each sample stands for one segment of the reach and sits at
     ``jitter`` of the way along it, so a boundary crossing a segment is noise, not a contour."""
@@ -264,7 +372,7 @@ def sun_optical_depth(
         current = f * f
         width = (current - previous) * SUN_REACH_M
         q = p + sun * ((previous + (current - previous) * jitter) * SUN_REACH_M)
-        tau += cloud_density(q[0], altitude_of(q), q[2], L, weather, shape, detail) * width
+        tau += light_density(q[0], altitude_of(q), q[2], L, weather, shape, detail, patches) * width
         previous = current
     return tau * L.extinction_per_m
 
@@ -272,7 +380,7 @@ def sun_optical_depth(
 @wp.func
 def column_optical_depth(
     p: wp.vec3, alt: float, span_m: float, jitter: float, L: Layer,
-    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D,
+    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D,
 ) -> float:
     """Optical depth straight up (``span_m`` > 0) or down from ``p`` to the layer's edge, on
     segments spaced as the square of their index and sampled at ``jitter`` along each."""
@@ -281,8 +389,8 @@ def column_optical_depth(
     for k in range(COLUMN_SAMPLES):
         f = float(k + 1) / float(COLUMN_SAMPLES)
         current = f * f
-        tau += cloud_density(p[0], alt + (previous + (current - previous) * jitter) * span_m, p[2],
-                             L, weather, shape, detail) * (current - previous)
+        tau += light_density(p[0], alt + (previous + (current - previous) * jitter) * span_m, p[2],
+                             L, weather, shape, detail, patches) * (current - previous)
         previous = current
     return tau * wp.abs(span_m) * L.extinction_per_m
 
@@ -322,7 +430,7 @@ def hash01(i: int, j: int) -> float:
 @wp.kernel
 def march_clouds(
     M: March, L: Layer,
-    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D,
+    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D,
     out_rgb: wp.array2d(dtype=wp.vec3), out_t: wp.array2d(dtype=float), out_dist: wp.array2d(dtype=float),
 ):
     j, i = wp.tid()
@@ -368,6 +476,8 @@ def march_clouds(
         count = int(0)
         # Metres marched since the last sample that held cloud; "far" before the first one.
         clear_m = float(1.0e9)
+        source = wp.vec3(0.0, 0.0, 0.0)
+        lit = int(0)
         while t < t_end and transmittance > 0.004 and count < M.max_steps:
             coarse = wp.max(M.step_min_m, M.step_growth * t)
             # Coarse steps through clear air. Within one coarse step of a cloud the step is
@@ -381,7 +491,7 @@ def march_clouds(
                 step = fine
             p = o + d * t
             alt = altitude_of(p)
-            dens = cloud_density(p[0], alt, p[2], L, weather, shape, detail)
+            dens = cloud_density(p[0], alt, p[2], L, weather, shape, detail, patches)
             if dens > 0.002:
                 if not near:
                     # First contact at a coarse step: back up and resample finely from there.
@@ -390,22 +500,27 @@ def march_clouds(
                     continue
                 clear_m = 0.0
                 sigma = dens * L.extinction_per_m
-                step = wp.min(coarse, wp.max(wp.min(coarse * FINE_STEP, SKIN_STEP / sigma), footprint))
-                jitter = hash01(i + 7919 * count, j + 104729 + 86028 * M.frame)
-                tau_sun = sun_optical_depth(p, M.sun_dir, jitter, L, weather, shape, detail)
-                sun = sunlight(cos_sun, tau_sun)
-                # Sky and ground light through the cloud above and below this point.
-                h = (alt - L.base_m) / L.thickness_m
-                tau_up = column_optical_depth(p, alt, (1.0 - h) * L.thickness_m, jitter, L, weather, shape, detail)
-                tau_dn = column_optical_depth(p, alt, -h * L.thickness_m, jitter, L, weather, shape, detail)
-                # The diffuse field inside a conservative cloud is a mix of what comes in from
-                # above and from below, weighted by how much of each reaches the point; the
-                # weights sum to one, so under a uniform sky the cloud returns exactly the sky.
-                w_up = diffuse_transmittance(tau_up)
-                w_dn = diffuse_transmittance(tau_dn)
-                ambient = (M.above_rgb * w_up + M.below_rgb * w_dn) / (w_up + w_dn)
-                source = (M.sun_rgb * sun + ambient) * ALBEDO
+                # Thin cloud takes longer steps than dense: a wisp is sampled, not resolved.
+                step = wp.min(coarse, wp.max(SKIN_STEP / sigma, wp.max(footprint, fine)))
                 absorbed = 1.0 - wp.exp(-sigma * step)
+                # Lighting is the expensive part (a dozen more density samples). A sample that
+                # adds under half a percent of the pixel keeps the light of the last one lit.
+                if lit == 0 or transmittance * absorbed > RELIGHT_WEIGHT:
+                    jitter = hash01(i + 7919 * count, j + 104729 + 86028 * M.frame)
+                    tau_sun = sun_optical_depth(p, M.sun_dir, jitter, L, weather, shape, detail, patches)
+                    sun = sunlight(cos_sun, tau_sun)
+                    # Sky and ground light through the cloud above and below this point.
+                    h = (alt - L.base_m) / L.thickness_m
+                    tau_up = column_optical_depth(p, alt, (1.0 - h) * L.thickness_m, jitter, L, weather, shape, detail, patches)
+                    tau_dn = column_optical_depth(p, alt, -h * L.thickness_m, jitter, L, weather, shape, detail, patches)
+                    # The diffuse field inside a conservative cloud is a mix of what comes in from
+                    # above and from below, weighted by how much of each reaches the point; the
+                    # weights sum to one, so under a uniform sky the cloud returns exactly the sky.
+                    w_up = diffuse_transmittance(tau_up)
+                    w_dn = diffuse_transmittance(tau_dn)
+                    ambient = (M.above_rgb * w_up + M.below_rgb * w_dn) / (w_up + w_dn)
+                    source = (M.sun_rgb * sun + ambient) * ALBEDO
+                    lit = 1
                 scattered += source * (transmittance * absorbed)
                 weighted_t += transmittance * absorbed * t
                 weight += transmittance * absorbed
@@ -569,6 +684,12 @@ class SkyTables:
         self.air_log_span = math.log(float(air_far_m) / float(air_near_m))
 
 
+def _fill_layer(layer: Any, cloudscape: Any) -> None:
+    """The cloudscape's constants into the kernel's struct."""
+    for key, value in cloudscape.kernel_constants().items():
+        setattr(layer, key, wp.vec3(*value) if isinstance(value, tuple) else value)
+
+
 class CloudRenderer:
     """Holds a cloudscape's textures on one GPU and marches cameras through it."""
 
@@ -587,8 +708,13 @@ class CloudRenderer:
             self.detail = wp.Texture3D(np.ascontiguousarray(cloudscape.detail, dtype=np.float32),
                                        filter_mode=linear, address_mode=wrap)
         self.layer = Layer()
-        for key, value in cloudscape.kernel_constants().items():
-            setattr(self.layer, key, value)
+        _fill_layer(self.layer, cloudscape)
+        atlas = getattr(cloudscape, "patch_atlas", None)
+        if atlas is None:
+            atlas = np.zeros((2, 2, 2), dtype=np.float32)
+        with wp.ScopedDevice(self.device):
+            self.patches = wp.Texture3D(np.ascontiguousarray(atlas, dtype=np.float32), filter_mode=linear,
+                                        address_mode=wp.TextureAddressMode.CLAMP)
         self._buffers = None
         self._layer = None
         self._frame = 0
@@ -689,8 +815,7 @@ class CloudRenderer:
         layer = self.layer
         if density_scale != 1.0:
             layer = Layer()
-            for key, value in self.cloudscape.kernel_constants().items():
-                setattr(layer, key, value)
+            _fill_layer(layer, self.cloudscape)
             layer.extinction_per_m = float(self.cloudscape.extinction_per_m * density_scale)
         with wp.ScopedDevice(self.device):
             if self._buffers is None or self._buffers[0].shape != shape:
@@ -698,7 +823,7 @@ class CloudRenderer:
                                  wp.zeros(shape, dtype=float))
             rgb, trans, dist = self._buffers
             wp.launch(march_clouds, dim=shape,
-                      inputs=[m, layer, self.weather, self.shape, self.detail, rgb, trans, dist])
+                      inputs=[m, layer, self.weather, self.shape, self.detail, self.patches, rgb, trans, dist])
             wp.synchronize_device(self.device)
         return rgb, trans, dist, m
 
@@ -711,7 +836,7 @@ class CloudRenderer:
             py = wp.array(y.reshape(-1).astype(np.float32), dtype=float)
             pz = wp.array(z.reshape(-1).astype(np.float32), dtype=float)
             out = wp.zeros(n, dtype=float)
-            wp.launch(_density_probe, dim=n, inputs=[px, py, pz, self.layer, self.weather, self.shape, self.detail, out])
+            wp.launch(_density_probe, dim=n, inputs=[px, py, pz, self.layer, self.weather, self.shape, self.detail, self.patches, out])
             wp.synchronize_device(self.device)
             return out.numpy().reshape(x.shape).astype(np.float64)
 
@@ -719,7 +844,7 @@ class CloudRenderer:
 @wp.kernel
 def _density_probe(
     xs: wp.array(dtype=float), ys: wp.array(dtype=float), zs: wp.array(dtype=float), L: Layer,
-    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, out: wp.array(dtype=float),
+    weather: wp.Texture2D, shape: wp.Texture3D, detail: wp.Texture3D, patches: wp.Texture3D, out: wp.array(dtype=float),
 ):
     i = wp.tid()
-    out[i] = cloud_density(xs[i], ys[i], zs[i], L, weather, shape, detail)
+    out[i] = cloud_density(xs[i], ys[i], zs[i], L, weather, shape, detail, patches)

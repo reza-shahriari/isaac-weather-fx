@@ -172,6 +172,9 @@ def remap01(v: float, lo: float, hi: float) -> float:
 #: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
 EROSION_TILE_M = 230.0
 PATCH_FOOTPRINT = 0.9
+SMALL_PERIOD = 0.4
+SMALL_COVER = 1.5
+SMALL_KEEP = 0.45
 RAGGED_TILES = 6.0
 RAGGED_LOW = 0.25
 RAGGED_HIGH = 1.8
@@ -186,17 +189,19 @@ def cell_hash(i: int, j: int, k: int) -> float:
 
 
 @wp.func
-def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, erode: int, L: Layer,
+def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, period: float, erode: int, L: Layer,
                     weather: wp.Texture2D, detail: wp.Texture3D, patches: wp.Texture3D) -> float:
     """``Cloudscape._lattice_density``, line for line: a simulated patch in each lattice cell the
     weather map keeps, moved, turned and scaled by the cell's hash, standing on the base."""
-    period = L.patch_period_m
     shift = 0.5 * period * float(lattice)
     channel = 10 * lattice
     cx = int(wp.floor((x - shift) / period))
     cz = int(wp.floor((z - shift) / period))
     mx = (float(cx) + 0.5) * period + shift
     mz = (float(cz) + 0.5) * period + shift
+    # The small clouds' lattice is fine, and only some of its cells hold one.
+    if lattice == 2 and cell_hash(cx, cz, 7 + channel) > SMALL_KEEP:
+        return 0.0
     # Which cells hold cloud comes from the weather map (its coverage is uniform over 0..1 and
     # smooth over kilometres), so clouds gather in groups with clear lanes between them, and
     # the cells deepest inside a group hold the largest clouds.
@@ -250,11 +255,18 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, er
 @wp.func
 def patch_density(x: float, y: float, z: float, erode: int, L: Layer, weather: wp.Texture2D, detail: wp.Texture3D,
                   patches: wp.Texture3D) -> float:
-    """``Cloudscape._patch_density``: two lattices, the second filled once the first is full."""
-    first = lattice_density(x, y, z, wp.min(L.patch_cover, 1.0), 0, erode, L, weather, detail, patches)
-    if L.patch_cover <= 1.0:
-        return first
-    return wp.max(first, lattice_density(x, y, z, L.patch_cover - 1.0, 1, erode, L, weather, detail, patches))
+    """``Cloudscape._patch_density``: two lattices of large clouds, the second filled once the
+    first is full, and a fine one of small clouds among them."""
+    d = lattice_density(x, y, z, wp.min(L.patch_cover, 1.0), 0, L.patch_period_m, erode, L, weather, detail, patches)
+    if L.patch_cover > 1.0:
+        d = wp.max(d, lattice_density(x, y, z, L.patch_cover - 1.0, 1, L.patch_period_m, erode, L, weather, detail, patches))
+    # A small cloud's box fits its small cell, so above that box's height there is none to find.
+    period = SMALL_PERIOD * L.patch_period_m
+    reach = period / (PATCH_FOOTPRINT * wp.max(L.patch_size[0], L.patch_size[2])) * L.patch_size[1]
+    if y - L.base_m >= reach:
+        return d
+    small = wp.min(SMALL_COVER * L.patch_cover, 1.0)
+    return wp.max(d, lattice_density(x, y, z, small, 2, period, erode, L, weather, detail, patches))
 
 
 @wp.func

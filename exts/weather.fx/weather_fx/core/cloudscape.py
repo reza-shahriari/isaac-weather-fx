@@ -47,6 +47,11 @@ PATCH_FOOTPRINT = 0.9
 EROSION_TILE_M = 230.0
 #: The skin erosion's strength swings over this many erosion tiles, between these two factors.
 RAGGED_TILES = 6.0
+#: The small clouds: their lattice's period as a share of the large one's, how much further
+#: into the weather map it reaches than the large clouds do, and the share of its cells kept.
+SMALL_PERIOD = 0.4
+SMALL_COVER = 1.5
+SMALL_KEEP = 0.45
 RAGGED_LOW = 0.25
 RAGGED_HIGH = 1.8
 
@@ -411,16 +416,18 @@ class Cloudscape:
     def _patch_density(self, x_m: Any, y_m: Any, z_m: Any, cover: float) -> np.ndarray:
         """``gpu/cloud_march.py::patch_density``, line for line. Two lattices, the second offset
         by half a cell and filled only once the first is full (``cover`` runs 0..2)."""
-        first = self._lattice_density(x_m, y_m, z_m, min(cover, 1.0), 0)
-        if cover <= 1.0:
-            return first
-        return np.maximum(first, self._lattice_density(x_m, y_m, z_m, cover - 1.0, 1))
+        period = self.profile.patch_period_m
+        d = self._lattice_density(x_m, y_m, z_m, min(cover, 1.0), 0, period)
+        if cover > 1.0:
+            d = np.maximum(d, self._lattice_density(x_m, y_m, z_m, cover - 1.0, 1, period))
+        # A fine lattice of small clouds among the large ones.
+        small = min(SMALL_COVER * cover, 1.0)
+        return np.maximum(d, self._lattice_density(x_m, y_m, z_m, small, 2, SMALL_PERIOD * period))
 
-    def _lattice_density(self, x_m: Any, y_m: Any, z_m: Any, cover: float, lattice: int) -> np.ndarray:
+    def _lattice_density(self, x_m: Any, y_m: Any, z_m: Any, cover: float, lattice: int, period: float) -> np.ndarray:
         p = self.profile
         x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x_m, y_m, z_m)))
         h = (y - self.base_m) / p.thickness_m
-        period = p.patch_period_m
         sx, sy, sz = self.patch_size_m
         count = len(self.patches or [])
         shift = 0.5 * period * lattice
@@ -432,6 +439,8 @@ class Cloudscape:
         wc = sample_wrapped(self.weather, mx / self.weather_tile_m, mz / self.weather_tile_m)[..., 0]
         rank = (wc - (1.0 - cover)) / max(cover, 1.0e-3)
         present = rank > 0.0
+        if lattice == 2:
+            present = present & (_cell_hash(cx, cz, 7 + channel) <= SMALL_KEEP)
         scale = (0.45 + 0.55 * np.sqrt(np.clip(rank, 0.0, None))) * (0.8 + 0.4 * _cell_hash(cx, cz, 2 + channel))
         angle = 6.2831853 * _cell_hash(cx, cz, 5 + channel)
         ca, sa = np.cos(angle), np.sin(angle)

@@ -172,6 +172,9 @@ def remap01(v: float, lo: float, hi: float) -> float:
 #: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
 EROSION_TILE_M = 230.0
 PATCH_FOOTPRINT = 0.9
+RAGGED_TILES = 6.0
+RAGGED_LOW = 0.25
+RAGGED_HIGH = 1.8
 
 
 @wp.func
@@ -236,6 +239,11 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, er
     e2 = wp.texture_sample(detail, wp.vec3f(x / f + 0.37, y / f + 0.11, z / f + 0.73), dtype=float)
     noise = 0.65 * e1 + 0.35 * e2
     strength = L.patch_erosion * (1.0 - 0.55 * wp.clamp(v * 1.4, 0.0, 1.0)) * (0.3 + 0.7 * smoothstep(0.0, 0.1, v))
+    # Nor is a cloud ragged all over: over about a kilometre the erosion swings between nearly
+    # none (a hard, growing turret) and nearly twice (a flank that is evaporating).
+    g = EROSION_TILE_M * RAGGED_TILES
+    ragged = wp.texture_sample(detail, wp.vec3f(x / g + 0.19, y / g + 0.61, z / g + 0.43), dtype=float)
+    strength = strength * (RAGGED_LOW + (RAGGED_HIGH - RAGGED_LOW) * smoothstep(0.3, 0.7, ragged))
     return remap01(d, noise * strength, 1.0)
 
 

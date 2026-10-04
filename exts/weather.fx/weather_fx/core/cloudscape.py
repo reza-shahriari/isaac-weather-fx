@@ -45,6 +45,10 @@ ATLAS_MARGIN = 0.02
 PATCH_FOOTPRINT = 0.9
 #: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
 EROSION_TILE_M = 230.0
+#: The skin erosion's strength swings over this many erosion tiles, between these two factors.
+RAGGED_TILES = 6.0
+RAGGED_LOW = 0.25
+RAGGED_HIGH = 1.8
 
 
 @dataclass(frozen=True)
@@ -452,6 +456,9 @@ class Cloudscape:
         e2 = sample_wrapped(self.detail, x / f + 0.37, y / f + 0.11, z / f + 0.73)
         noise = 0.65 * e1 + 0.35 * e2
         strength = p.patch_erosion * (1.0 - 0.55 * np.clip(v * 1.4, 0.0, 1.0)) * (0.3 + 0.7 * _smoothstep(0.0, 0.1, v))
+        g = t * RAGGED_TILES
+        ragged = sample_wrapped(self.detail, x / g + 0.19, y / g + 0.61, z / g + 0.43)
+        strength = strength * (RAGGED_LOW + (RAGGED_HIGH - RAGGED_LOW) * _smoothstep(0.3, 0.7, ragged))
         eroded = _remap(d, noise * strength, 1.0) if p.patch_erosion > 0.0 else d
         return np.where(inside & (d > 0.0), eroded, 0.0)
 

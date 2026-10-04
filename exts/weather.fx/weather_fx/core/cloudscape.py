@@ -41,6 +41,8 @@ PATCH_DIRECTORIES = (pathlib.Path(__file__).resolve().parents[1] / "data" / "clo
 #: Empty margin each patch keeps on either side along the atlas's x axis, as a fraction of its
 #: slot, so linear filtering never mixes two patches.
 ATLAS_MARGIN = 0.02
+#: How much of a patch's box its cloud fills across: the part that must stay inside a lattice cell.
+PATCH_FOOTPRINT = 0.9
 #: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
 EROSION_TILE_M = 230.0
 
@@ -56,7 +58,9 @@ class CloudPatch:
 
 def load_patches(directory: Any = None) -> List[CloudPatch]:
     """The patches in a directory (``*.npz`` from ``tools/simulate_cloud_patches.py``), by name;
-    with no directory, every one in :data:`PATCH_DIRECTORIES`. An empty list if there are none."""
+    with no directory, those of the first of :data:`PATCH_DIRECTORIES` that holds any (a user's
+    folder stands in for the shipped set only when that set is missing, never mixes into it).
+    An empty list if there are none."""
     directories = [pathlib.Path(directory).expanduser()] if directory else list(PATCH_DIRECTORIES)
     found: Dict[str, CloudPatch] = {}
     for folder in directories:
@@ -67,6 +71,8 @@ def load_patches(directory: Any = None) -> List[CloudPatch]:
                 density = np.asarray(data["density"], dtype=np.float32)
                 found[path.stem] = CloudPatch(path.stem, density / max(float(density.max()), 1e-9),
                                               float(data["voxel_m"]))
+        if found:
+            break
     return [found[name] for name in sorted(found)]
 
 
@@ -135,7 +141,7 @@ class CloudscapeProfile:
     crisp_to: float = 0.55
     #: Simulated patches: the lattice's cell, metres (one patch, a group of clouds, per cell), and
     #: how much of a patch's density the small noise can eat at its base.
-    patch_period_m: float = 2600.0
+    patch_period_m: float = 3200.0
     patch_erosion: float = 0.5
     #: Liquid water at the base as a fraction of the top's. Lifted air condenses more the higher
     #: it goes (the adiabat), so a cloud is thin and grey at its base and dense at its top.
@@ -423,12 +429,14 @@ class Cloudscape:
         rank = (wc - (1.0 - cover)) / max(cover, 1.0e-3)
         present = rank > 0.0
         scale = (0.45 + 0.55 * np.sqrt(np.clip(rank, 0.0, None))) * (0.8 + 0.4 * _cell_hash(cx, cz, 2 + channel))
-        scale = np.minimum(scale, period / (0.8 * max(sx, sz)))
-        slack = np.maximum(period - scale * 0.8 * max(sx, sz), 0.0)
-        lx = x - mx - (_cell_hash(cx, cz, 3 + channel) - 0.5) * slack
-        lz = z - mz - (_cell_hash(cx, cz, 4 + channel) - 0.5) * slack
         angle = 6.2831853 * _cell_hash(cx, cz, 5 + channel)
         ca, sa = np.cos(angle), np.sin(angle)
+        # The turned box has to fit its cell, or the cell's edge cuts the cloud flat.
+        fx = PATCH_FOOTPRINT * (np.abs(ca) * sx + np.abs(sa) * sz)
+        fz = PATCH_FOOTPRINT * (np.abs(sa) * sx + np.abs(ca) * sz)
+        scale = np.minimum(scale, period / np.maximum(fx, fz))
+        lx = x - mx - (_cell_hash(cx, cz, 3 + channel) - 0.5) * np.maximum(period - scale * fx, 0.0)
+        lz = z - mz - (_cell_hash(cx, cz, 4 + channel) - 0.5) * np.maximum(period - scale * fz, 0.0)
         u = (ca * lx + sa * lz) / (scale * sx) + 0.5
         v = (y - self.base_m) / (scale * sy)
         w = (-sa * lx + ca * lz) / (scale * sz) + 0.5

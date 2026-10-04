@@ -126,6 +126,44 @@ def simulate(cache: str) -> None:
     print(f"[patch] baked {a.frames} frames at res {a.res} in {time.time() - t:.0f} s", flush=True)
 
 
+def round_off(values: np.ndarray, seed: int) -> np.ndarray:
+    """Taper a cloud that reaches the side of its box, so the box never cuts it flat.
+
+    Wind carries part of the smoke out through the domain's open wall, and the trim puts the
+    box's side right there. Toward such a side the density is eroded, not faded: a threshold
+    rises to the cloud's peak at the wall and only what is denser than it stays, so the cloud
+    ends in its own billows. The threshold's distance from the wall wobbles over a few hundred
+    metres, so the end is not a plane either.
+    """
+    rng = np.random.default_rng(seed)
+    peak = float(values.max())
+    out = values / peak
+    for axis in (0, 2):
+        n = out.shape[axis]
+        other = 2 - axis
+        for side in (0, 1):
+            face = np.take(out, range(4) if side == 0 else range(n - 4, n), axis=axis)
+            if face.max() < 0.1:
+                continue
+            width = 0.3 * n
+            along = np.arange(n, dtype=np.float32) if side == 0 else np.arange(n - 1, -1, -1, dtype=np.float32)
+            a_o = np.arange(out.shape[other], dtype=np.float32)[None, :]
+            a_y = np.arange(out.shape[1], dtype=np.float32)[:, None]
+            wobble = np.zeros((out.shape[1], out.shape[other]), dtype=np.float32)
+            for _ in range(6):
+                k = rng.uniform(0.02, 0.09, 2)
+                wobble += np.sin(k[0] * a_y + k[1] * a_o + rng.uniform(0.0, 6.283))
+            wobble *= 0.3 / 6.0 ** 0.5
+            shape = [1, 1, 1]
+            shape[axis] = n
+            e = (along / width).reshape(shape)
+            wob = wobble[None, :, :] if axis == 0 else wobble.T[:, :, None]
+            t = np.clip(e + wob * np.clip(1.5 - e, 0.0, 1.0), 0.0, 1.0)
+            threshold = 1.0 - t * t * (3.0 - 2.0 * t)
+            out = np.clip((out - threshold) / np.maximum(1.0 - threshold, 1.0e-3), 0.0, 1.0)
+    return out * peak
+
+
 def convert(cache: str, name: str) -> None:
     path = os.path.join(cache, "data", f"fluid_data_{a.frame:04d}.vdb")
     grid = openvdb.read(path, "density")
@@ -144,6 +182,7 @@ def convert(cache: str, name: str) -> None:
         lo = 0 if axis == 1 else max(int(idx.min()) - 2, 0)
         keep.append(slice(lo, min(int(idx.max()) + 3, values.shape[axis])))
     values = values[tuple(keep)]
+    values = round_off(values, a.seed)
     density = np.round(255.0 * np.clip(values / values.max(), 0.0, 1.0)).astype(np.uint8)
     os.makedirs(a.out, exist_ok=True)
     out = os.path.join(a.out, name + ".npz")

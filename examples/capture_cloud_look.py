@@ -47,6 +47,7 @@ parser.add_argument("--rt-subframes", type=int, default=8)
 parser.add_argument("--pt-subframes", type=int, default=48)
 parser.add_argument("--skip-path-traced", action="store_true")
 parser.add_argument("--skip-timing", action="store_true")
+parser.add_argument("--pan", type=int, default=0, help="frames of a full turn in Real-Time, as pan.mp4 (0: skip)")
 args, _ = parser.parse_known_args()
 
 # Kit picks a Vulkan device by PCI order; make CUDA's device 0 the same card, since the cloud
@@ -186,6 +187,27 @@ for row, (_, tag, _, _) in enumerate(modes):
 sheet_path = os.path.join(args.out, "sheet.jpg")
 sheet.save(sheet_path, quality=90)
 print(f"[look] wrote {sheet_path}", flush=True)
+
+if args.pan:
+    import subprocess
+
+    folder = os.path.join(args.out, "pan")
+    os.makedirs(folder, exist_ok=True)
+    settings.set("/rtx/rendermode", "RaytracedLighting")
+    wx.set_time(hour_utc=views[0][1])
+    aim(0.0, 22.0)
+    pump(30)
+    for k in range(args.pan):
+        # One app update per frame, as a viewport does: the layer has only its history to lean on.
+        aim(360.0 * k / args.pan, 22.0)
+        wx.step(1.0 / 30.0)
+        simulation_app.update()
+        rep.orchestrator.step(rt_subframes=2)
+        Image.fromarray(np.asarray(rgb.get_data())[..., :3]).save(os.path.join(folder, f"frame_{k:04d}.png"))
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", "30", "-i",
+                    os.path.join(folder, "frame_%04d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-crf", "20", os.path.join(args.out, "pan.mp4")], check=True)
+    print(f"[look] wrote {os.path.join(args.out, 'pan.mp4')}", flush=True)
 
 report["layer"] = wx.stats().get("viewport", {}).get("cloud_layer")
 

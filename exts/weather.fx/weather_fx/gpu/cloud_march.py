@@ -171,6 +171,7 @@ def remap01(v: float, lo: float, hi: float) -> float:
 
 #: Tile of the coarser of the two noises that erode a patch's skin, metres; the finer is a quarter.
 EROSION_TILE_M = 230.0
+PATCH_FOOTPRINT = 0.9
 
 
 @wp.func
@@ -200,16 +201,16 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, er
     rank = (wc[0] - (1.0 - cover)) / wp.max(cover, 1.0e-3)
     if rank <= 0.0:
         return 0.0
-    widest = wp.max(L.patch_size[0], L.patch_size[2])
     scale = (0.45 + 0.55 * wp.sqrt(rank)) * (0.8 + 0.4 * cell_hash(cx, cz, 2 + channel))
-    scale = wp.min(scale, period / (0.8 * widest))
-    # The cloud sits inside its box, so the box may reach a little past its cell.
-    slack = wp.max(period - scale * 0.8 * widest, 0.0)
-    lx = x - mx - (cell_hash(cx, cz, 3 + channel) - 0.5) * slack
-    lz = z - mz - (cell_hash(cx, cz, 4 + channel) - 0.5) * slack
     angle = 6.2831853 * cell_hash(cx, cz, 5 + channel)
     ca = wp.cos(angle)
     sa = wp.sin(angle)
+    # The turned box has to fit its cell, or the cell's edge cuts the cloud flat.
+    fx = PATCH_FOOTPRINT * (wp.abs(ca) * L.patch_size[0] + wp.abs(sa) * L.patch_size[2])
+    fz = PATCH_FOOTPRINT * (wp.abs(sa) * L.patch_size[0] + wp.abs(ca) * L.patch_size[2])
+    scale = wp.min(scale, period / wp.max(fx, fz))
+    lx = x - mx - (cell_hash(cx, cz, 3 + channel) - 0.5) * wp.max(period - scale * fx, 0.0)
+    lz = z - mz - (cell_hash(cx, cz, 4 + channel) - 0.5) * wp.max(period - scale * fz, 0.0)
     u = (ca * lx + sa * lz) / (scale * L.patch_size[0]) + 0.5
     v = (y - L.base_m) / (scale * L.patch_size[1])
     w = (-sa * lx + ca * lz) / (scale * L.patch_size[2]) + 0.5
@@ -353,7 +354,7 @@ COLUMN_SAMPLES = 2
 #: sun, and its phase function is ``MS_PHASE**k`` of the way from isotropic to the droplets'.
 #: With five octaves a thick cloud's sunlit face returns about 0.4 of a white ground's radiance.
 MS_OCTAVES = 5
-MS_ENERGY = 0.6
+MS_ENERGY = 0.45
 MS_SHADOW = 0.5
 MS_PHASE = 0.5
 

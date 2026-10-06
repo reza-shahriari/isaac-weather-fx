@@ -331,6 +331,23 @@ def test_the_gpu_composite_is_the_sky_where_there_is_no_cloud(cumulus: C.Cloudsc
     trans = cloudy.last_transmittance()
     assert trans.shape == (54, 96) and trans.min() >= 0.0 and trans.max() <= 1.0
     assert (trans < 0.5).mean() > 0.05
+    # Without the scene's depth a surface's pixels cannot be told from the sky's.
+    assert cloudy.last_surface_transmittance() is None
+    # A surface 50 m away on the left half: nothing of a cloud based at 1.2 km is in front of
+    # it, while the whole ray behind it still carries the cloud.
+    depth = np.full((54, 96), 1.0e9, dtype=np.float32)
+    depth[:, :48] = 50.0
+    with cloud_march.wp.ScopedDevice("cuda:0"):
+        depth_wp = cloud_march.wp.array(depth, dtype=float)
+    cloudy.render_layer(cloud_march.Camera(96, 54, 60.0, 35.0, 20.0), lighting, tables, accumulate_frames=1,
+                        step_growth=0.003, max_steps=4096, thin_tau=0.02, min_density=0.0,
+                        depth=depth_wp, depth_max_m=1.0e6)
+    surface = cloudy.last_surface_transmittance()
+    whole = cloudy.last_transmittance()
+    assert surface is not None and cloudy.depth_used
+    assert np.all(surface[:, :48] == 1.0)
+    assert (whole[:, :48] < 0.5).any()
+    assert np.allclose(surface[:, 48:], whole[:, 48:], atol=1e-6)
 
 
 def test_a_cloudscape_offers_what_another_sensors_march_reads(cumulus: C.Cloudscape) -> None:

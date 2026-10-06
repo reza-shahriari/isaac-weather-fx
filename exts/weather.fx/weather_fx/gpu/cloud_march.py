@@ -853,6 +853,8 @@ class CloudRenderer:
         self._layer = None
         self._veil = None
         self._veil_raw = None
+        #: Whether the last :meth:`render_layer` had the scene's depth to stop at.
+        self.depth_used = False
         #: After ``render_layer(depth=...)``: the veil's ``(emission, opacity)`` arrays, or None.
         self.veil = None
         self._no_depth = None
@@ -929,12 +931,29 @@ class CloudRenderer:
         return self._layer
 
     def last_transmittance(self) -> Optional[np.ndarray]:
-        """The transmittance of the last :meth:`render_layer`, ``(height, width)`` float64 on the
-        host: 1 where the ray met no cloud short of the scene's depth, falling to 0.004 where it
-        went opaque (the march's own cut-off). ``None`` before the first frame."""
+        """The transmittance of the last :meth:`render_layer` along each **whole** ray,
+        ``(height, width)`` float64 on the host: 1 where the ray met no cloud, falling to 0.004
+        where it went opaque (the march's own cut-off). A surface in the scene does not end it:
+        the renderer draws the surface over the layer, so on a surface's pixels this is the
+        cloud *behind* it. ``None`` before the first frame."""
         if self.transmittance is None:
             return None
         return np.asarray(self.transmittance.numpy(), dtype=np.float64)
+
+    def last_surface_transmittance(self) -> Optional[np.ndarray]:
+        """The transmittance of the last :meth:`render_layer` from the camera to whatever the
+        ray reaches first -- the scene's surface where the depth had one, else the end of the
+        march -- ``(height, width)`` float64: what an object in the frame is actually seen
+        through, and so what another band's march to the same hit is compared with. ``None``
+        before the first frame or when that frame had no scene depth (then a surface's pixels
+        cannot be told from the sky's). One frame's march, not the accumulated mean."""
+        if self.transmittance is None or self._veil_raw is None or not self.depth_used:
+            return None
+        alpha = np.asarray(self._veil_raw.numpy()[..., 3], dtype=np.float64)
+        whole = np.asarray(self.transmittance.numpy(), dtype=np.float64)
+        # The kernel's convention: opacity in front of the surface where there is one (>= 0),
+        # ``transmittance - 1 - 1e-6`` (< 0) where the ray has no surface.
+        return np.where(alpha >= 0.0, 1.0 - alpha, whole)
 
     def reset_history(self) -> None:
         """Forget the accumulated frames (the cloud, the light or the camera jumped)."""
@@ -991,6 +1010,7 @@ class CloudRenderer:
         m.min_density = float(min_density)
         m.frame = int(frame)
         m.depth_on = 0 if depth is None else 1
+        self.depth_used = depth is not None
         m.depth_scale, m.depth_max_m = float(depth_scale), float(depth_max_m)
         shape = (camera.height, camera.width)
         layer = self.layer

@@ -141,18 +141,28 @@ class CloudLayerEffect(Effect):
         self._drop_depth()
 
     def transmittance(self) -> Optional[np.ndarray]:
-        """The visible transmittance of the cloud the layer last drew, per pixel of the camera it
-        follows, ``(height, width)`` float64 -- or ``None`` before the first draw. Another band's
-        march of the same cloudscape is held to this, pixel by pixel."""
+        """The visible transmittance along each whole ray of the camera the layer last drew,
+        ``(height, width)`` float64 -- or ``None`` before the first draw. On the sky's pixels
+        another band's march of the same cloudscape is held to this; on a surface's pixels use
+        :meth:`surface_transmittance`."""
         if self._renderer is None:
             return None
         return self._renderer.last_transmittance()
+
+    def surface_transmittance(self) -> Optional[np.ndarray]:
+        """The visible transmittance from the camera to the first surface (or the sky) per pixel
+        of the camera the layer last drew, or ``None`` when that frame had no scene depth: on a
+        surface's pixels :meth:`transmittance` is the cloud behind it, which the renderer hides."""
+        if self._renderer is None:
+            return None
+        return self._renderer.last_surface_transmittance()
 
     def stats(self) -> dict:
         return {"active": self._authored, "frame_ms": round(self._frame_ms, 2),
                 "resolution": list(self._size), "building": self._job.busy,
                 "ready": self._renderer is not None, "failed": self._failed,
-                "veil": self._veil_visible}
+                "veil": self._veil_visible,
+                "depth": bool(self._renderer is not None and self._renderer.depth_used)}
 
     # --- the cloud and its tables --------------------------------------------------------
 

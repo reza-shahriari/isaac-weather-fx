@@ -212,6 +212,16 @@ class CloudParams:
     layer_scale: float = param(0.75, "Pixel layer scale", min=0.25, max=1.0, advanced=True,
                                tooltip="Resolution of the per-pixel cloud layer as a fraction "
                                        "of the viewport's. Lower is faster and softer.")
+    layer_accumulate: int = param(16, "Pixel layer frames", min=1, max=64, advanced=True,
+                                  tooltip="Frames the per-pixel layer blends its jittered march "
+                                          "over (reprojected as the camera moves). 1 is one "
+                                          "frame, which a headless capture of separate exposures "
+                                          "wants: history from earlier poses would otherwise "
+                                          "ghost into each frame.")
+    layer_step_m: float = param(24.0, "Pixel layer step", min=2.0, max=200.0, unit="m", advanced=True,
+                                tooltip="Smallest step of the per-pixel march, metres; it grows "
+                                        "with distance. Finer resolves the patches' detail at "
+                                        "a cost in frame time.")
     spacing_m: float = param(0.0, "Cloud spacing", min=0.0, max=12000.0, unit="m",
                              tooltip="Distance between the centres of neighbouring large clouds "
                                      "(cumulus and congestus). 0 uses the cloud type's own.")

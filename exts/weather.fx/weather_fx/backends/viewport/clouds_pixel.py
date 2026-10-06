@@ -341,6 +341,8 @@ class CloudLayerEffect(Effect):
         layer = self._renderer.render_layer(
             view, self._lighting, self._tables, gains=gains, flip=False,
             density_scale=float(state.clouds.density_scale),
+            accumulate_frames=max(1, int(getattr(state.clouds, "layer_accumulate", 16))),
+            step_min_m=float(getattr(state.clouds, "layer_step_m", 24.0)),
             depth=depth, depth_scale=mpu, depth_max_m=0.8 * QUAD_DEPTH * float(clip[1]) * mpu,
             air_light=1.0 - AIR_SHADE * min(max(float(state.clouds.cover), 0.0), 1.0) ** 2)
         veil = self._renderer.veil

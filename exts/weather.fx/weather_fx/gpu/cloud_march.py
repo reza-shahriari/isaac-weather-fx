@@ -164,6 +164,13 @@ class March:
     max_distance_m: float
     step_min_m: float
     step_growth: float
+    #: Optical depth one step may span inside thin cloud: the local density is taken to hold
+    #: over it. 0.8 samples a wisp rather than resolving it (a viewport's speed); a capture
+    #: that must integrate thin edges exactly sets it near the fine step's own depth.
+    thin_tau: float
+    #: Density under which a sample counts as clear air. 0.002 skips the faintest fringe
+    #: (a viewport's speed); a capture that must integrate thin edges exactly sets 0.
+    min_density: float
     max_steps: int
     frame: int
     #: Scene depth: 1 if ``march_clouds`` is given the distance to the nearest surface per pixel,
@@ -558,7 +565,7 @@ def march_clouds(
             p = o + d * t
             alt = altitude_of(p)
             dens = cloud_density(p[0], alt, p[2], L, weather, shape, detail, patches)
-            if dens > 0.002:
+            if dens > M.min_density:
                 if not near:
                     # First contact at a coarse step: back up and resample finely from there.
                     t -= coarse - fine
@@ -567,7 +574,7 @@ def march_clouds(
                 clear_m = 0.0
                 sigma = dens * L.extinction_per_m
                 # Thin cloud takes longer steps than dense: a wisp is sampled, not resolved.
-                step = wp.min(coarse, wp.max(SKIN_STEP / sigma, wp.max(footprint, fine)))
+                step = wp.min(coarse, wp.max(M.thin_tau / sigma, wp.max(footprint, fine)))
                 absorbed = 1.0 - wp.exp(-sigma * step)
                 # Lighting is the expensive part (a dozen more density samples). A sample that
                 # adds under half a percent of the pixel keeps the light of the last one lit.
@@ -862,16 +869,19 @@ class CloudRenderer:
     def render(
         self, camera: Camera, lighting: Lighting, *, max_distance_m: float = 80_000.0,
         step_min_m: float = 24.0, step_growth: float = 0.012, max_steps: int = 768,
+        thin_tau: float = SKIN_STEP, min_density: float = 0.002,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """``(scattered rgb, transmittance, mean distance)``, each ``(height, width[, 3])``."""
-        rgb, trans, dist, _ = self._march(camera, lighting, max_distance_m, step_min_m, step_growth, max_steps)
+        rgb, trans, dist, _ = self._march(camera, lighting, max_distance_m, step_min_m, step_growth, max_steps,
+                                          thin_tau=thin_tau, min_density=min_density)
         return rgb.numpy().astype(np.float64), trans.numpy().astype(np.float64), dist.numpy().astype(np.float64)
 
     def render_layer(
         self, camera: Camera, lighting: Lighting, tables: SkyTables, *,
         gains: Tuple[float, float, float] = (1.0, 1.0, 1.0), scale: float = 1.0, flip: bool = False,
         density_scale: float = 1.0, max_distance_m: float = 80_000.0, step_min_m: float = 24.0,
-        step_growth: float = 0.012, max_steps: int = 768, accumulate_frames: int = 16,
+        step_growth: float = 0.012, max_steps: int = 768, accumulate_frames: int = 16, thin_tau: float = SKIN_STEP,
+        min_density: float = 0.002,
         depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9, air_light: float = 1.0,
     ):
         """The finished layer for one camera, left on the GPU: a ``(height, width)`` ``vec4``
@@ -886,7 +896,8 @@ class CloudRenderer:
         self._frame += 1
         rgb, trans, dist, m = self._march(camera, lighting, max_distance_m, step_min_m, step_growth,
                                           max_steps, density_scale, frame=self._frame,
-                                          depth=depth, depth_scale=depth_scale, depth_max_m=depth_max_m)
+                                          depth=depth, depth_scale=depth_scale, depth_max_m=depth_max_m,
+                                          thin_tau=thin_tau, min_density=min_density)
         if accumulate_frames > 1:
             rgb, trans, dist = self._accumulate(camera, lighting, m, rgb, trans, dist,
                                                 density_scale, accumulate_frames)
@@ -961,7 +972,8 @@ class CloudRenderer:
 
     def _march(self, camera: Camera, lighting: Lighting, max_distance_m: float, step_min_m: float,
                step_growth: float, max_steps: int, density_scale: float = 1.0, frame: int = 0,
-               depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9):
+               depth: Any = None, depth_scale: float = 1.0, depth_max_m: float = 1.0e9,
+               thin_tau: float = SKIN_STEP, min_density: float = 0.002):
         forward, right, up = camera.basis()
         m = March()
         m.origin = wp.vec3(*[float(v) for v in camera.position_m])
@@ -975,6 +987,8 @@ class CloudRenderer:
         m.below_rgb = wp.vec3(*[float(v) for v in lighting.below_rgb])
         m.max_distance_m = float(max_distance_m)
         m.step_min_m, m.step_growth, m.max_steps = float(step_min_m), float(step_growth), int(max_steps)
+        m.thin_tau = float(thin_tau)
+        m.min_density = float(min_density)
         m.frame = int(frame)
         m.depth_on = 0 if depth is None else 1
         m.depth_scale, m.depth_max_m = float(depth_scale), float(depth_max_m)

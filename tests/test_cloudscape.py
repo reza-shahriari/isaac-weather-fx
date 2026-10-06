@@ -325,7 +325,9 @@ def test_the_gpu_composite_is_the_sky_where_there_is_no_cloud(cumulus: C.Cloudsc
     assert renderer.last_transmittance().shape == (54, 96)
     assert np.all(renderer.last_transmittance() == 1.0)
     cloudy = cloud_march.CloudRenderer(cumulus, device="cuda:0")
-    cloudy.render_layer(cloud_march.Camera(96, 54, 60.0, 35.0, 20.0), lighting, tables)
+    # A capture's converged settings: one frame, fine steps, wisps resolved, every fringe counted.
+    cloudy.render_layer(cloud_march.Camera(96, 54, 60.0, 35.0, 20.0), lighting, tables, accumulate_frames=1,
+                        step_growth=0.003, max_steps=4096, thin_tau=0.02, min_density=0.0)
     trans = cloudy.last_transmittance()
     assert trans.shape == (54, 96) and trans.min() >= 0.0 and trans.max() <= 1.0
     assert (trans < 0.5).mean() > 0.05

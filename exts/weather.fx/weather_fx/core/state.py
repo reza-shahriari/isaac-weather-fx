@@ -222,6 +222,20 @@ class CloudParams:
                                 tooltip="Smallest step of the per-pixel march, metres; it grows "
                                         "with distance. Finer resolves the patches' detail at "
                                         "a cost in frame time.")
+    layer_step_growth: float = param(0.012, "Pixel layer step growth", min=0.0005, max=0.05, advanced=True,
+                                     tooltip="How the per-pixel march's step through clear air grows "
+                                             "with distance, metres per metre: 0.012 is 60 m at 5 km. "
+                                             "A coarse step can skip a thin wisp between samples.")
+    layer_max_steps: int = param(768, "Pixel layer max steps", min=64, max=16384, advanced=True,
+                                 tooltip="Cap on the per-pixel march's samples along one ray.")
+    layer_thin_tau: float = param(0.8, "Pixel layer thin-cloud step", min=0.01, max=2.0, advanced=True,
+                                  tooltip="Optical depth one step may span inside thin cloud, the "
+                                          "local density taken to hold over it. 0.8 samples a wisp "
+                                          "rather than resolving it (fast); a capture that must "
+                                          "integrate thin edges exactly uses 0.02-0.05.")
+    layer_min_density: float = param(0.002, "Pixel layer density floor", min=0.0, max=0.05, advanced=True,
+                                     tooltip="Density under which a sample counts as clear air. "
+                                             "0 integrates the faintest fringe.")
     spacing_m: float = param(0.0, "Cloud spacing", min=0.0, max=12000.0, unit="m",
                              tooltip="Distance between the centres of neighbouring large clouds "
                                      "(cumulus and congestus). 0 uses the cloud type's own.")

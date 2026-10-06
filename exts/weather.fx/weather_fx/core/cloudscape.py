@@ -188,6 +188,20 @@ class CloudscapeProfile:
     #: The shape noise's lobes and its finer cells, as divisors of the tile.
     lobe_div: float = 4.0
     fine_div: float = 8.0
+    #: Horizontal stretch of the weather map and the shape noise along the field's x axis. 1 is
+    #: a cloud as long as it is wide; cirrus are streaked along the wind, 4-8.
+    stretch: float = 1.0
+    #: Whether the cloud is formed from surface air lifted to its condensation level. A
+    #: convective genus stands on the LCL and its base is dry-adiabatic from the surface; a
+    #: non-convective one (cirrus) sits far above the mixed layer at the environment's own
+    #: temperature, and carries its own default base.
+    convective: bool = True
+    base_default_m: float = 0.0
+    #: Vertical visible optical depth above which a column counts as *covered* for this genus,
+    #: or ``None`` for the module's default (a cloud the sky cannot be seen through). A thin
+    #: genus never reaches that, so its cover is read against its own kind of column: a cirrus
+    #: column is cirrus-covered once it veils the sky, not once it hides it.
+    cloudy_optical_depth: Optional[float] = None
 
 
 CLOUDSCAPE_TYPES: Dict[str, CloudscapeProfile] = {
@@ -211,6 +225,17 @@ CLOUDSCAPE_TYPES: Dict[str, CloudscapeProfile] = {
     "stratus": CloudscapeProfile(
         name="stratus", thickness_m=400.0, extinction_per_m=0.03, top_min=0.9, top_max=1.0,
         taper=0.0, spacing_m=6000.0, smallest_m=1500.0, erosion=0.12, shape_tile_m=5000.0),
+    # Cirrus: ice, high and thin, streaked along the wind. The base defaults to 9 km (the
+    # mid-latitude range is 6-12 km) and is not a condensation level of surface air. Optically
+    # shallow: the median cloudy column is near unit visible optical depth, so the sky shows
+    # through, where every other genus here is opaque within its first hundred metres. Fibrous
+    # rather than cauliflowered: soft edges top and bottom, no taper, and the water does not grow
+    # with height the way a liquid cloud's does.
+    "cirrus": CloudscapeProfile(
+        name="cirrus", thickness_m=1500.0, extinction_per_m=0.0024, top_min=0.6, top_max=1.0,
+        taper=0.0, spacing_m=5000.0, smallest_m=1500.0, erosion=0.6, shape_tile_m=8000.0,
+        lobe_div=3.0, fine_div=6.0, edge_base=2.0, edge_top=4.0, water_base=0.6, stretch=6.0,
+        convective=False, base_default_m=9000.0, cloudy_optical_depth=0.3),
 }
 
 
@@ -293,6 +318,12 @@ class Cloudscape:
     patches: Optional[List[CloudPatch]] = None
     #: Towering cumulus patches, placed in ``profile.towers`` of the large clouds' cells.
     towers: Optional[List[CloudPatch]] = None
+    #: Top of the surface air's mixed layer, metres -- the lifting condensation level -- when the
+    #: cloud is *not* convective and so does not stand on it. ``None`` for a convective genus,
+    #: whose base is that level. A thermal band lapses the surface air dry-adiabatically to this
+    #: height and at the environment's rate above it, so a cirrus at 9 km reads the temperature of
+    #: 9 km and not of a parcel lifted dry to 9 km (30 K colder).
+    mixed_layer_top_m: Optional[float] = None
     #: (nz, ny, slots * nx) float32: the patches side by side, indexed ``[w, v, u]``.
     patch_atlas: Optional[np.ndarray] = field(init=False, default=None, repr=False)
     #: How full the two lattices of patches are, 0..2, as the cover solve found.
@@ -410,7 +441,10 @@ class Cloudscape:
 
     @property
     def _cloudy_optical_depth(self) -> float:
-        return PATCH_CLOUDY_OPTICAL_DEPTH if self.patches else CLOUDY_OPTICAL_DEPTH
+        if self.patches:
+            return PATCH_CLOUDY_OPTICAL_DEPTH
+        own = self.profile.cloudy_optical_depth
+        return CLOUDY_OPTICAL_DEPTH if own is None else float(own)
 
     def _column_optical_depth(self, x: np.ndarray, z: np.ndarray, bias: float, levels: int) -> np.ndarray:
         """Visible optical depth straight up through the layer, by the midpoint rule."""
@@ -445,7 +479,7 @@ class Cloudscape:
         x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x_m, y_m, z_m)))
         h = (y - self.base_m) / p.thickness_m
         inside = (h > 0.0) & (h < 1.0)
-        weather = sample_wrapped(self.weather, x / self.weather_tile_m, z / self.weather_tile_m)
+        weather = sample_wrapped(self.weather, x / (p.stretch * self.weather_tile_m), z / self.weather_tile_m)
         coverage = np.clip(weather[..., 0] + bias, 0.0, 1.0)
         top = p.top_min + (p.top_max - p.top_min) * weather[..., 1]
         hr = h / top
@@ -453,7 +487,7 @@ class Cloudscape:
         gradient = _smoothstep(0.0, 0.07, hr) * (1.0 - _smoothstep(0.35, 1.0, hr))
         coverage = coverage * (1.0 - p.taper * np.clip(hr, 0.0, 1.0) ** 1.5)
         s = 1.0 / p.shape_tile_m
-        shape = sample_wrapped(self.shape, x * s, y * s, z * s)
+        shape = sample_wrapped(self.shape, x * s / p.stretch, y * s, z * s)
         base = _remap(shape * gradient, 1.0 - coverage, 1.0)
         d = 1.0 / p.detail_tile_m
         detail = sample_wrapped(self.detail, x * d, y * d, z * d)
@@ -546,6 +580,7 @@ class Cloudscape:
             erosion=float(p.erosion), edge_base=float(p.edge_base), edge_top=float(p.edge_top),
             crisp_from=float(p.crisp_from), crisp_to=float(p.crisp_to),
             water_base=float(p.water_base), extinction_per_m=float(p.extinction_per_m),
+            stretch=float(p.stretch),
             patch_on=1 if self.patches else 0, patch_count=len(self.patches or []),
             patch_size=tuple(float(v) for v in self.patch_size_m),
             patch_period_m=float(p.patch_period_m), patch_cover=float(self.patch_cover),
@@ -640,7 +675,7 @@ _CACHE: Dict[Tuple[Any, ...], "Cloudscape"] = {}
 
 
 def supports(genus: str) -> bool:
-    """Whether a genus has a cloudscape profile (cirrus does not yet)."""
+    """Whether a genus has a cloudscape profile (every genus the state offers does)."""
     return genus in CLOUDSCAPE_TYPES
 
 
@@ -657,14 +692,17 @@ def cloudscape_from_state(state: Any, build: bool = True):
     cached = _CACHE.get(key)
     if cached is not None or not build:
         return cached
+    profile = CLOUDSCAPE_TYPES[clouds.genus]
+    lcl = _clouds.lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
     base = clouds.base_m
     if base <= 0.0:
-        base = _clouds.lifting_condensation_level_m(clouds.temperature_c, clouds.dewpoint_c)
+        # A convective cloud stands on the surface air's condensation level; a cirrus has its
+        # own level, far above it.
+        base = profile.base_default_m if not profile.convective else lcl
     # Simulated patches are cumulus; the sheet genera stay the function.
     patches = load_patches(getattr(clouds, "patches", "") or None) if clouds.genus in PATCH_GENERA else []
     if getattr(clouds, "patches", "") == "none":
         patches = []
-    profile = CLOUDSCAPE_TYPES[clouds.genus]
     # The owner's controls over the field of patches; each leaves the genus default at its own.
     spacing = float(getattr(clouds, "spacing_m", 0.0))
     profile = dataclasses.replace(
@@ -687,7 +725,8 @@ def cloudscape_from_state(state: Any, build: bool = True):
         towers = []
     built = Cloudscape(cover=float(clouds.cover), base_m=float(base),
                        profile=profile, seed=int(clouds.seed),
-                       patches=patches or None, towers=towers or None)
+                       patches=patches or None, towers=towers or None,
+                       mixed_layer_top_m=None if profile.convective else float(lcl))
     while len(_CACHE) >= 2:
         _CACHE.pop(next(iter(_CACHE)))
     _CACHE[key] = built

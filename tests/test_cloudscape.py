@@ -119,6 +119,69 @@ def test_the_layer_wraps_with_the_weather_map(cumulus: C.Cloudscape) -> None:
     assert np.allclose(a, b, atol=1e-6)
 
 
+
+
+@pytest.fixture(scope="module")
+def cirrus() -> C.Cloudscape:
+    return C.Cloudscape(cover=0.4, base_m=9000.0, profile=C.CLOUDSCAPE_TYPES["cirrus"], seed=4, **SMALL)
+
+
+def test_a_cirrus_is_high_thin_and_streaked_along_the_wind(cirrus: C.Cloudscape) -> None:
+    """The ice genus: a base far above any condensation level of surface air, a median cloudy
+    column near unit visible optical depth (the sky shows through, where a cumulus is opaque
+    within its first hundred metres), and streaks -- the column depth stays correlated several
+    times further along x, the wind's axis, than across it."""
+    from weather_fx.core.clouds import lifting_condensation_level_m
+    from weather_fx.core.state import WeatherState
+
+    assert cirrus.base_m == 9000.0 and cirrus.top_m == 10_500.0
+    assert 0.3 < cirrus.optical_depth < 3.0
+    cumulus = C.CLOUDSCAPE_TYPES["cumulus"]
+    assert cumulus.convective and not cirrus.profile.convective
+    n = 160
+    axis = (np.arange(n) + 0.5) / n * cirrus.weather_tile_m
+    x, z = np.meshgrid(axis, axis, indexing="xy")
+    tau = cirrus._column_optical_depth(x, z, cirrus.coverage_bias, 10)
+    assert (tau > 0.1).mean() > 0.2
+
+    def correlation(lag: int, axis: int) -> float:
+        a = np.moveaxis(tau, axis, 0)
+        return float(np.corrcoef(a[:-lag].ravel(), a[lag:].ravel())[0, 1])
+
+    along_x, across = correlation(6, 1), correlation(6, 0)
+    assert along_x > across + 0.2, (along_x, across)
+    # From a state: the base defaults to the genus's own level and the mixed layer's top is the
+    # LCL the surface air would have condensed at, which a thermal band lapses dry to.
+    state = WeatherState().with_updates("clouds", enabled=True, cover=0.3, genus="cirrus", seed=4,
+                                        base_m=0.0, temperature_c=20.0, dewpoint_c=10.0)
+    built = C.cloudscape_from_state(state)
+    assert built is not None and built.base_m == 9000.0
+    assert built.mixed_layer_top_m == pytest.approx(lifting_condensation_level_m(20.0, 10.0))
+    warm = C.cloudscape_from_state(state.with_updates("clouds", genus="stratus"))
+    assert warm is not None and warm.mixed_layer_top_m is None
+    assert warm.base_m == pytest.approx(lifting_condensation_level_m(20.0, 10.0))
+
+
+def test_the_gpu_kernel_is_the_numpy_function_for_a_streaked_genus(cirrus: C.Cloudscape) -> None:
+    """The stretch is in both evaluations: the kernel follows the numpy cirrus as it does the
+    cumulus, so an infrared march on either side reads one streaked cloud."""
+    from weather_fx.gpu import cloud_march
+
+    wp = cloud_march.wp
+    if wp.get_cuda_device_count() == 0:
+        pytest.skip("no CUDA device")
+    renderer = cloud_march.CloudRenderer(cirrus, device="cuda:0")
+    rng = np.random.default_rng(5)
+    n = 20_000
+    x = rng.uniform(-60_000.0, 60_000.0, n)
+    z = rng.uniform(-30_000.0, 30_000.0, n)
+    y = rng.uniform(cirrus.base_m - 50.0, cirrus.top_m + 50.0, n)
+    gpu, ref = renderer.density(x, y, z), cirrus.density(x, y, z)
+    assert (ref > 0.0).mean() > 0.05
+    error = np.abs(gpu - ref)
+    assert np.percentile(error, 99) < 0.02 and error.mean() < 2e-3
+
+
 @pytest.mark.skipif(not __import__("weather_fx.gpu", fromlist=["warp_available"]).warp_available(),
                     reason="no Warp")
 def test_the_gpu_kernel_is_the_numpy_function(cumulus: C.Cloudscape) -> None:
@@ -225,9 +288,11 @@ def test_pixel_is_a_render_path_for_the_genera_it_knows() -> None:
 
     assert choose_cloud_path("pixel", "RaytracedLighting", "cumulus") == "pixel"
     assert choose_cloud_path("pixel", "PathTracing", "stratocumulus") == "pixel"
-    # Cirrus has no cloudscape profile yet: it falls back to what "auto" would do.
-    assert choose_cloud_path("pixel", "PathTracing", "cirrus") == "volume"
-    assert choose_cloud_path("pixel", "RaytracedLighting", "cirrus") == "dome"
+    # Every genus the state offers has a profile, cirrus since the infrared asked for it.
+    for genus in ("cumulus", "congestus", "stratocumulus", "stratus", "storm", "cirrus"):
+        assert C.supports(genus)
+        assert choose_cloud_path("pixel", "PathTracing", genus) == "pixel"
+    assert choose_cloud_path("pixel", "RaytracedLighting", "nimbostratus") == "dome"
 
 
 @pytest.mark.skipif(not __import__("weather_fx.gpu", fromlist=["warp_available"]).warp_available(),
@@ -256,6 +321,14 @@ def test_the_gpu_composite_is_the_sky_where_there_is_no_cloud(cumulus: C.Cloudsc
     sky = S.sky_radiance_rgb(d, conditions) / conditions.exposure_scale * np.array([1.0, 0.5, 2.0]) * 3.0
     assert np.allclose(out[..., :3], sky, rtol=0.03)
     assert np.all(out[..., 3] == 1.0)
+    # What another band's march is compared against: the frame's transmittance, all 1 here.
+    assert renderer.last_transmittance().shape == (54, 96)
+    assert np.all(renderer.last_transmittance() == 1.0)
+    cloudy = cloud_march.CloudRenderer(cumulus, device="cuda:0")
+    cloudy.render_layer(cloud_march.Camera(96, 54, 60.0, 35.0, 20.0), lighting, tables)
+    trans = cloudy.last_transmittance()
+    assert trans.shape == (54, 96) and trans.min() >= 0.0 and trans.max() <= 1.0
+    assert (trans < 0.5).mean() > 0.05
 
 
 def test_a_cloudscape_offers_what_another_sensors_march_reads(cumulus: C.Cloudscape) -> None:

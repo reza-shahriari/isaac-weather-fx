@@ -140,6 +140,14 @@ class CloudLayerEffect(Effect):
         self._veil_providers = None
         self._drop_depth()
 
+    def transmittance(self) -> Optional[np.ndarray]:
+        """The visible transmittance of the cloud the layer last drew, per pixel of the camera it
+        follows, ``(height, width)`` float64 -- or ``None`` before the first draw. Another band's
+        march of the same cloudscape is held to this, pixel by pixel."""
+        if self._renderer is None:
+            return None
+        return self._renderer.last_transmittance()
+
     def stats(self) -> dict:
         return {"active": self._authored, "frame_ms": round(self._frame_ms, 2),
                 "resolution": list(self._size), "building": self._job.busy,

@@ -125,6 +125,9 @@ class Layer:
     crisp_to: float
     water_base: float
     extinction_per_m: float
+    #: Horizontal stretch of the weather map and the shape noise along the field's x axis: 1 for
+    #: a cloud that is as long as it is wide, 6 for cirrus streaked along the wind.
+    stretch: float
     #: 1: the cloud is simulated patches (``core.cloudscape``), one per cell of a lattice
     #: ``patch_period_m`` wide, its box ``patch_size`` metres standing on the base.
     patch_on: int
@@ -306,7 +309,8 @@ def cloud_density(
         return 0.0
     if L.patch_on != 0:
         return patch_density(x, y, z, 1, L, weather, detail, patches)
-    w = wp.texture_sample(weather, wp.vec2f(x / L.weather_tile_m, z / L.weather_tile_m), dtype=wp.vec2f)
+    w = wp.texture_sample(weather, wp.vec2f(x / (L.stretch * L.weather_tile_m), z / L.weather_tile_m),
+                          dtype=wp.vec2f)
     coverage = wp.clamp(w[0] + L.coverage_bias, 0.0, 1.0)
     if coverage <= 0.0:
         return 0.0
@@ -317,7 +321,7 @@ def cloud_density(
         return 0.0
     coverage = coverage * (1.0 - L.taper * wp.pow(wp.clamp(hr, 0.0, 1.0), 1.5))
     s = 1.0 / L.shape_tile_m
-    shp = wp.texture_sample(shape, wp.vec3f(x * s, y * s, z * s), dtype=float)
+    shp = wp.texture_sample(shape, wp.vec3f(x * s / L.stretch, y * s, z * s), dtype=float)
     base = remap01(shp * gradient, 1.0 - coverage, 1.0)
     if base <= 0.0:
         return 0.0
@@ -849,6 +853,11 @@ class CloudRenderer:
         self._history = None      # two sets of (rgb, transmittance, distance, count)
         self._history_key = None  # what the history was accumulated under
         self._history_pose = None
+        #: After ``render_layer``: that frame's transmittance and mean cloud distance per pixel,
+        #: ``(height, width)`` float Warp arrays on this device (accumulated over frames like the
+        #: colour). What another sensor's march compares its own transmittance against.
+        self.transmittance = None
+        self.distance = None
 
     def render(
         self, camera: Camera, lighting: Lighting, *, max_distance_m: float = 80_000.0,
@@ -881,6 +890,7 @@ class CloudRenderer:
         if accumulate_frames > 1:
             rgb, trans, dist = self._accumulate(camera, lighting, m, rgb, trans, dist,
                                                 density_scale, accumulate_frames)
+        self.transmittance, self.distance = trans, dist
         k = Compose()
         k.light_azimuth = tables.light_azimuth_rad
         k.air_near_m, k.air_log_span = tables.air_near_m, tables.air_log_span
@@ -906,6 +916,14 @@ class CloudRenderer:
                     self.veil = self._veil
             wp.synchronize_device(self.device)
         return self._layer
+
+    def last_transmittance(self) -> Optional[np.ndarray]:
+        """The transmittance of the last :meth:`render_layer`, ``(height, width)`` float64 on the
+        host: 1 where the ray met no cloud short of the scene's depth, falling to 0.004 where it
+        went opaque (the march's own cut-off). ``None`` before the first frame."""
+        if self.transmittance is None:
+            return None
+        return np.asarray(self.transmittance.numpy(), dtype=np.float64)
 
     def reset_history(self) -> None:
         """Forget the accumulated frames (the cloud, the light or the camera jumped)."""

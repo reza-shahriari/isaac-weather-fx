@@ -38,7 +38,11 @@ is about the model as it stands.
   `cells × cell_m` across — 15 km at the defaults — and repeats beyond that, which is visible near
   the horizon if you look for it. The per-pixel cloudscape does not: each 32 km tile of the plane
   reads the weather map at its own hashed offset, cross-faded at the borders on the coverage's
-  normal score (`core.cloudscape.sample_aperiodic`), so its cover pattern never repeats.
+  normal score (`core.cloudscape.sample_aperiodic`). That blend is baked into a texture five
+  tiles a side, so the cover pattern repeats only every 160 km, twice the 80 km a camera sees.
+  The bake is 52 MB and about 3 s per cloudscape. Evaluating the blend inside the march instead
+  hung or crashed the kernel in Isaac Sim's CUDA context (CUDA 700, an invalid local-memory
+  read) though never outside it; not root-caused.
 - Cloud scattering is a multi-octave approximation wrapped in a two-stream albedo envelope, not a
   path trace. It gets the *energy* right and the directional detail approximately; it does not
   produce a fogbow or a glory.

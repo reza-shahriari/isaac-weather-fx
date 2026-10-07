@@ -145,13 +145,6 @@ class Layer:
     patch_count: int
     #: How much of the density the small noise can eat at the base, 0..1.
     patch_erosion: float
-    #: WX.22: the weather map's mean type, the hash channel of the tiles' offsets, and the share
-    #: of a tile its neighbours cross-fade over (``core.cloudscape.sample_aperiodic``).
-    kind_mean: float
-    aperiodic_key: int
-    aperiodic_border: float
-    #: Texels per side of the weather map, which the kernel filters itself (see ``tile_sample``).
-    weather_cells: int
 
 
 @wp.struct
@@ -221,116 +214,6 @@ def cell_hash(i: int, j: int, k: int) -> float:
 
 
 @wp.func
-def erf_as(x: float) -> float:
-    """``core.cloudscape._erf``: Abramowitz & Stegun 7.1.26, term for term."""
-    a = wp.abs(x)
-    t = 1.0 / (1.0 + 0.3275911 * a)
-    y = 1.0 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
-               + 0.254829592) * t * wp.exp(-a * a)
-    return wp.sign(x) * y
-
-
-@wp.func
-def erfinv_giles(x: float) -> float:
-    """``core.cloudscape._erfinv``: Giles (2010), term for term."""
-    w = -wp.log((1.0 - x) * (1.0 + x))
-    p = float(0.0)
-    if w < 5.0:
-        q = w - 2.5
-        p = 2.81022636e-08
-        p = 3.43273939e-07 + p * q
-        p = -3.5233877e-06 + p * q
-        p = -4.39150654e-06 + p * q
-        p = 0.00021858087 + p * q
-        p = -0.00125372503 + p * q
-        p = -0.00417768164 + p * q
-        p = 0.246640727 + p * q
-        p = 1.50140941 + p * q
-    else:
-        q = wp.sqrt(w) - 3.0
-        p = -0.000200214257
-        p = 0.000100950558 + p * q
-        p = 0.00134934322 + p * q
-        p = -0.00367342844 + p * q
-        p = 0.00573950773 + p * q
-        p = -0.0076224613 + p * q
-        p = 0.00943887047 + p * q
-        p = 1.00167406 + p * q
-        p = 2.83297682 + p * q
-    return p * x
-
-
-@wp.func
-def tile_fade(distance: float, border: float) -> float:
-    t = wp.clamp(distance / border, 0.0, 1.0)
-    return 0.5 + 0.5 * t * t * (3.0 - 2.0 * t)
-
-
-@wp.func
-def tile_sample(u: float, v: float, ti: int, tj: int, L: Layer, weather: wp.Texture2D) -> wp.vec2f:
-    ou = float(0.0)
-    ov = float(0.0)
-    if ti != 0 or tj != 0:
-        ou = cell_hash(ti, tj, L.aperiodic_key)
-        ov = cell_hash(ti, tj, L.aperiodic_key + 1)
-    # Bilinear in float32 over four unfiltered texels, as ``core.cloudscape.sample_wrapped`` does.
-    # The hardware's linear filter weights texels in 1/256 steps, which moved coverage by up to
-    # 0.005 and, at a lattice cell's presence threshold, put a cloud where the reference had none.
-    n = float(L.weather_cells)
-    fx = (u + ou) * n - 0.5
-    fy = (v + ov) * n - 0.5
-    x0 = wp.floor(fx)
-    y0 = wp.floor(fy)
-    tx = fx - x0
-    ty = fy - y0
-    a = wp.texture_sample(weather, wp.vec2f((x0 + 0.5) / n, (y0 + 0.5) / n), dtype=wp.vec2f)
-    b = wp.texture_sample(weather, wp.vec2f((x0 + 1.5) / n, (y0 + 0.5) / n), dtype=wp.vec2f)
-    c = wp.texture_sample(weather, wp.vec2f((x0 + 0.5) / n, (y0 + 1.5) / n), dtype=wp.vec2f)
-    d = wp.texture_sample(weather, wp.vec2f((x0 + 1.5) / n, (y0 + 1.5) / n), dtype=wp.vec2f)
-    return (a * (1.0 - tx) + b * tx) * (1.0 - ty) + (c * (1.0 - tx) + d * tx) * ty
-
-
-@wp.func
-def score(c: float) -> float:
-    return 1.41421356237 * erfinv_giles(2.0 * wp.clamp(c, 1.0e-6, 1.0 - 1.0e-6) - 1.0)
-
-
-@wp.func
-def weather_at(u: float, v: float, L: Layer, weather: wp.Texture2D) -> wp.vec2f:
-    """``core.cloudscape.sample_aperiodic``, line for line (WX.22)."""
-    fi = wp.floor(u)
-    fj = wp.floor(v)
-    i = int(fi)
-    j = int(fj)
-    fu = u - fi
-    fv = v - fj
-    du = 1
-    if fu < 0.5:
-        du = -1
-    dv = 1
-    if fv < 0.5:
-        dv = -1
-    au = tile_fade(wp.min(fu, 1.0 - fu), L.aperiodic_border)
-    av = tile_fade(wp.min(fv, 1.0 - fv), L.aperiodic_border)
-    s0 = tile_sample(u, v, i, j, L, weather)
-    w0 = au * av
-    if w0 >= 1.0:
-        return s0
-    w1 = (1.0 - au) * av
-    w2 = au * (1.0 - av)
-    w3 = (1.0 - au) * (1.0 - av)
-    s1 = tile_sample(u, v, i + du, j, L, weather)
-    s2 = tile_sample(u, v, i, j + dv, L, weather)
-    s3 = tile_sample(u, v, i + du, j + dv, L, weather)
-    norm = wp.sqrt(w0 * w0 + w1 * w1 + w2 * w2 + w3 * w3)
-    g = (w0 * score(s0[0]) + w1 * score(s1[0]) + w2 * score(s2[0]) + w3 * score(s3[0])) / norm
-    coverage = 0.5 * (1.0 + erf_as(g / 1.41421356237))
-    m = L.kind_mean
-    kind = m + (w0 * (s0[1] - m) + w1 * (s1[1] - m) + w2 * (s2[1] - m) + w3 * (s3[1] - m)) / norm
-    return wp.vec2f(coverage, wp.clamp(kind, 0.0, 1.0))
-
-
-@wp.func
 def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, period: float, erode: int, L: Layer,
                     weather: wp.Texture2D, detail: wp.Texture3D, patches: wp.Texture3D) -> float:
     """``Cloudscape._lattice_density``, line for line: a simulated patch in each lattice cell the
@@ -347,7 +230,7 @@ def lattice_density(x: float, y: float, z: float, cover: float, lattice: int, pe
     # Which cells hold cloud comes from the weather map (its coverage is uniform over 0..1 and
     # smooth over kilometres), so clouds gather in groups with clear lanes between them, and
     # the cells deepest inside a group hold the largest clouds.
-    wc = weather_at(mx / L.weather_tile_m, mz / L.weather_tile_m, L, weather)
+    wc = wp.texture_sample(weather, wp.vec2f(mx / L.weather_tile_m, mz / L.weather_tile_m), dtype=wp.vec2f)
     rank = (wc[0] - (1.0 - cover)) / wp.max(cover, 1.0e-3)
     if rank <= 0.0:
         return 0.0
@@ -433,7 +316,8 @@ def cloud_density(
         return 0.0
     if L.patch_on != 0:
         return patch_density(x, y, z, 1, L, weather, detail, patches)
-    w = weather_at(x / (L.stretch * L.weather_tile_m), z / L.weather_tile_m, L, weather)
+    w = wp.texture_sample(weather, wp.vec2f(x / (L.stretch * L.weather_tile_m), z / L.weather_tile_m),
+                          dtype=wp.vec2f)
     coverage = wp.clamp(w[0] + L.coverage_bias, 0.0, 1.0)
     if coverage <= 0.0:
         return 0.0
@@ -951,9 +835,8 @@ class CloudRenderer:
         wrap = wp.TextureAddressMode.WRAP
         linear = wp.TextureFilterMode.LINEAR
         with wp.ScopedDevice(self.device):
-            # Unfiltered: ``tile_sample`` interpolates the weather map itself (WX.22).
-            self.weather = wp.Texture2D(np.ascontiguousarray(cloudscape.weather, dtype=np.float32),
-                                        filter_mode=wp.TextureFilterMode.CLOSEST, address_mode=wrap)
+            self.weather = wp.Texture2D(np.ascontiguousarray(cloudscape.weather_field, dtype=np.float32),
+                                        filter_mode=linear, address_mode=wrap)
             self.shape = wp.Texture3D(np.ascontiguousarray(cloudscape.shape, dtype=np.float32),
                                       filter_mode=linear, address_mode=wrap)
             self.detail = wp.Texture3D(np.ascontiguousarray(cloudscape.detail, dtype=np.float32),

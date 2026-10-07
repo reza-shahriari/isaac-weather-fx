@@ -138,8 +138,12 @@ def test_the_blend_keeps_the_coverage_uniform_and_the_origin_tile_as_it_was(
     q = np.quantile(cov, [0.1, 0.25, 0.5, 0.75, 0.9])
     ref = np.quantile(C.sample_wrapped(cumulus.weather, u, v)[..., 0], [0.1, 0.25, 0.5, 0.75, 0.9])
     assert np.max(np.abs(q - ref)) < 0.03, (q, ref)
-    inner = rng.uniform(C.APERIODIC_BORDER, 1.0 - C.APERIODIC_BORDER, (2, 2000))
-    assert np.array_equal(cumulus.weather_at(*inner), C.sample_wrapped(cumulus.weather, *inner))
+    margin = C.APERIODIC_BORDER + 1.0 / cumulus.weather_cells  # a texel clear of the blend
+    inner = rng.uniform(margin, 1.0 - margin, (2, 2000))
+    # The bake holds the origin tile's texels as they are; reading it at u / 5 rather than u
+    # differs from the old lookup only in the last bits of the interpolation weight.
+    assert np.allclose(cumulus.weather_at(*inner), C.sample_wrapped(cumulus.weather, *inner),
+                       rtol=0.0, atol=1e-6)
 
 
 def test_no_seam_where_two_tiles_meet(cumulus: C.Cloudscape) -> None:
@@ -148,13 +152,33 @@ def test_no_seam_where_two_tiles_meet(cumulus: C.Cloudscape) -> None:
     own slope allows."""
     t = np.linspace(-2.0, 2.0, 41)
     eps = 1.0e-7
-    for u_border in (1.0, -1.0, 2.0):
+    for u_border in (1.0, -1.0, 2.0, 0.0, float(C.APERIODIC_TILES)):  # 0 and 5: the bake's own wrap
         a = cumulus.weather_at(np.full_like(t, u_border - eps), t)
         b = cumulus.weather_at(np.full_like(t, u_border + eps), t)
         assert np.max(np.abs(a - b)) < 1e-3
         a = cumulus.weather_at(t, np.full_like(t, u_border - eps))
         b = cumulus.weather_at(t, np.full_like(t, u_border + eps))
         assert np.max(np.abs(a - b)) < 1e-3
+
+
+def test_the_baked_field_is_the_blend_and_repeats_only_past_the_cameras_reach(
+        cumulus: C.Cloudscape) -> None:
+    """What the kernel's texture holds: :func:`sample_aperiodic` (tiles modulo five) at its
+    texel centres, read with one filtered lookup. Between texel centres that differs from the
+    blend of four filtered reads where the blend bends: at the shipped 512 texels a tile, by
+    0.002 in coverage on average and 0.011 at the 99th percentile; this fixture's map is four
+    times coarser, and so is the bar. The field repeats every five tiles (160 km, twice the
+    80 km a camera sees) and the kernel is told so."""
+    k = C.APERIODIC_TILES
+    rng = np.random.default_rng(5)
+    u, v = rng.uniform(-6.0, 6.0, (2, 20_000))
+    direct = C.sample_aperiodic(cumulus.weather, u, v, C.APERIODIC_CHANNEL, C.KIND_MEAN, period=k)
+    error = np.abs(cumulus.weather_at(u, v) - direct)[..., 0]
+    assert error.mean() < 0.02 and np.percentile(error, 99) < 0.1, (error.mean(), error.max())
+    assert np.allclose(cumulus.weather_at(u + k, v - k), cumulus.weather_at(u, v), atol=1e-6)
+    assert cumulus.weather_field.shape == (k * cumulus.weather_cells, k * cumulus.weather_cells, 2)
+    assert cumulus.weather_field.dtype == np.float32
+    assert cumulus.kernel_constants()["weather_tile_m"] == k * cumulus.weather_tile_m
 
 
 @pytest.fixture(scope="module")

@@ -58,8 +58,18 @@ SMALL_PERIOD = 0.4
 #: score with variance-preserving weights (Heitz & Neyret 2018), so the coverage stays uniform on
 #: 0..1 through it and the cover solve still holds; the tile at the origin keeps no offset.
 APERIODIC_BORDER = 0.25
-#: The hash channels the tiles' offsets are drawn on (``_cell_hash``'s third argument).
+#: The blended plane is baked once into a texture this many tiles a side (``Cloudscape.
+#: weather_field``), its tiles' hashes taken modulo it so the bake wraps without a seam: 5 x 32 km
+#: is 160 km, twice the camera's 80 km reach. The kernel then reads that one texture with one
+#: filtered lookup, as it read the single tile before WX.22 -- evaluating the blend per sample
+#: inside the march hung or crashed it in Isaac Sim's CUDA context, though not outside it.
+APERIODIC_TILES = 5
+#: The hash channels the tiles' offsets are drawn on (``_cell_hash``'s third argument). One for
+#: every seed: the map itself differs by seed, so the offsets need not.
 APERIODIC_CHANNEL = 4051
+#: The type channel's mean, which its blend fades about: 0.6 x a rank-normalised coverage plus
+#: 0.4 x a field normalised to 0..1 is 0.5 by construction; ``_build`` checks it holds.
+KIND_MEAN = 0.5
 #: Coverage is clipped this far inside 0..1 before its normal score is taken.
 _SCORE_EPS = 1.0e-6
 SMALL_COVER = 1.5
@@ -297,14 +307,16 @@ def _fade(distance: np.ndarray) -> np.ndarray:
     return 0.5 + 0.5 * t * t * (3.0 - 2.0 * t)
 
 
-def sample_aperiodic(texture: np.ndarray, u: Any, v: Any, key: int, kind_mean: float) -> np.ndarray:
+def sample_aperiodic(texture: np.ndarray, u: Any, v: Any, key: int, kind_mean: float,
+                     period: Optional[int] = None) -> np.ndarray:
     """The weather map at ``(u, v)`` in tile units, never repeating (WX.22).
 
     Tile ``(i, j)`` reads the wrapped map at ``(u, v)`` plus its own hashed offset (zero at the
     origin's tile). Within :data:`APERIODIC_BORDER` of a border the sample is a blend of up to
     four tiles: the coverage on its normal score, ``Φ(Σ w g_k / √Σ w²)``, which keeps a uniform
     coverage uniform; the type channel about its mean with the same weights. Inside a tile the
-    one sample is returned as it is.
+    one sample is returned as it is. With ``period``, the tiles' indices are taken modulo it,
+    so the result itself tiles every ``period`` tiles, continuously (what the bake needs).
     """
     u = np.asarray(u, dtype=np.float64)
     v = np.asarray(v, dtype=np.float64)
@@ -319,6 +331,8 @@ def sample_aperiodic(texture: np.ndarray, u: Any, v: Any, key: int, kind_mean: f
              (i, j + dv, au * (1.0 - av)), (i + du, j + dv, (1.0 - au) * (1.0 - av)))
     samples, weights = [], []
     for ti, tj, w in tiles:
+        if period is not None:
+            ti, tj = np.mod(ti, period), np.mod(tj, period)
         origin = (ti == 0.0) & (tj == 0.0)
         ou = np.where(origin, 0.0, _cell_hash(ti, tj, key))
         ov = np.where(origin, 0.0, _cell_hash(ti, tj, key + 1))
@@ -389,13 +403,14 @@ class Cloudscape:
     detail_cells: int = 64
     #: (cells, cells, 2) float32: coverage and type, each 0..1.
     weather: np.ndarray = field(init=False, repr=False)
+    #: The weather map with WX.22's blend baked in, (k n, k n, 2) float32 for k = APERIODIC_TILES:
+    #: what the kernel's weather texture holds.
+    weather_field: np.ndarray = field(init=False, repr=False)
     #: (cells, cells, cells) float32, 0..1.
     shape: np.ndarray = field(init=False, repr=False)
     detail: np.ndarray = field(init=False, repr=False)
     #: The coverage bias the cover solve found (see :meth:`_solve_cover`).
     coverage_bias: float = field(init=False, default=0.0)
-    #: The weather map's mean type, which the aperiodic blend fades about (WX.22).
-    kind_mean: float = field(init=False, default=0.5)
     #: Simulated patches of cloud. With any, they are the cloud: the weather map says which
     #: lattice cells hold one, and the noise function is not used. ``None`` or empty: the function.
     patches: Optional[List[CloudPatch]] = None
@@ -440,7 +455,10 @@ class Cloudscape:
             flat, 3.0, self.seed + 911, cell_size_m=size, min_wavelength_m=4.0 * p.spacing_m)[0]
         kind = np.clip(0.6 * coverage + 0.4 * slow, 0.0, 1.0)
         self.weather = np.stack([coverage, kind], axis=-1).astype(np.float32)
-        self.kind_mean = float(self.weather[..., 1].mean())
+        if abs(float(self.weather[..., 1].mean()) - KIND_MEAN) > 0.02:
+            raise ValueError("the weather map's type channel no longer averages KIND_MEAN; "
+                             "sample_aperiodic fades about that mean (WX.22)")
+        self.weather_field = self._bake_field()
 
         m = self.shape_cells
         vox = p.shape_tile_m / m
@@ -658,7 +676,8 @@ class Cloudscape:
         p = self.profile
         return dict(
             base_m=float(self.base_m), thickness_m=float(p.thickness_m),
-            weather_tile_m=float(self.weather_tile_m), shape_tile_m=float(p.shape_tile_m),
+            # The kernel's weather texture is the baked field, so its period is the field's.
+            weather_tile_m=self.field_tile_m, shape_tile_m=float(p.shape_tile_m),
             detail_tile_m=float(p.detail_tile_m), coverage_bias=float(self.coverage_bias),
             top_min=float(p.top_min), top_max=float(p.top_max), taper=float(p.taper),
             erosion=float(p.erosion), edge_base=float(p.edge_base), edge_top=float(p.edge_top),
@@ -671,19 +690,27 @@ class Cloudscape:
             patch_erosion=float(p.patch_erosion), patch_fill=float(p.patch_fill),
             small_keep=float(p.small_keep), tower_count=len(self.towers or []),
             tower_size=tuple(float(v) for v in self.tower_size_m),
-            towers=float(p.towers) if self.towers else 0.0,
-            kind_mean=float(self.kind_mean), aperiodic_key=int(self.aperiodic_key),
-            aperiodic_border=float(APERIODIC_BORDER), weather_cells=int(self.weather.shape[0]))
+            towers=float(p.towers) if self.towers else 0.0)
+
+    def _bake_field(self) -> np.ndarray:
+        """:func:`sample_aperiodic` at every texel centre of :data:`APERIODIC_TILES` tiles a side,
+        at the map's own resolution, so the origin tile's interior is the map texel for texel."""
+        n, k = self.weather_cells, APERIODIC_TILES
+        axis = (np.arange(k * n) + 0.5) / n
+        rows = [sample_aperiodic(self.weather, axis[None, :], axis[r:r + n, None], APERIODIC_CHANNEL,
+                                 KIND_MEAN, period=k) for r in range(0, k * n, n)]
+        return np.concatenate(rows).astype(np.float32)
 
     @property
-    def aperiodic_key(self) -> int:
-        """The hash channel this cloudscape's tile offsets are drawn on: its seed's own."""
-        return APERIODIC_CHANNEL + 2 * int(self.seed)
+    def field_tile_m(self) -> float:
+        """The baked weather field's period, metres: :data:`APERIODIC_TILES` weather tiles."""
+        return float(APERIODIC_TILES * self.weather_tile_m)
 
     def weather_at(self, u: Any, v: Any) -> np.ndarray:
-        """The weather map at ``(u, v)`` in tile units, the same everywhere a camera can see
-        only once (:func:`sample_aperiodic`, WX.22)."""
-        return sample_aperiodic(self.weather, u, v, self.aperiodic_key, self.kind_mean)
+        """The weather at ``(u, v)`` in weather-tile units: the baked field, read as the kernel
+        reads its texture. Repeats only every :data:`APERIODIC_TILES` tiles (WX.22)."""
+        k = float(APERIODIC_TILES)
+        return sample_wrapped(self.weather_field, np.asarray(u) / k, np.asarray(v) / k)
 
     def measured_cover(self, columns: int = 256) -> float:
         """Fraction of columns holding cloud a camera cannot see through, on a fresh lattice."""

@@ -122,7 +122,13 @@ def test_the_gpu_kernel_places_the_patches_the_numpy_reference_does(sky: C.Cloud
     gpu, ref = renderer.density(x, y, z), sky.density(x, y, z)
     assert (ref > 0.0).mean() > 0.01
     error = np.abs(gpu - ref)
-    assert error.max() < 0.05
+    # A lattice cell holds a patch when its weather value passes a threshold, and the GPU reads
+    # the map through the texture unit, whose linear weights step in 1/256: a cell within ~0.005
+    # of its threshold can go either way. Since WX.22 a value near a tile border is a blend of up
+    # to four such reads, and 2 of these 30,000 points land in a cell that flipped. Both bands
+    # march on the GPU, so they agree with each other exactly; this bounds the GPU against the
+    # NumPy reference, which is the oracle and not a band.
+    assert (error > 0.05).mean() < 2e-4
     assert error.mean() < 1e-3
 
 
@@ -198,5 +204,6 @@ def test_towers_stand_among_the_cumulus_and_the_gpu_places_them_too(patches) -> 
     assert not (plain.density(x, y, z)[high] > 0.0).any()
     gpu = cloud_march.CloudRenderer(mixed, device="cuda:0").density(x, y, z)
     error = np.abs(gpu - ref)
-    assert error.max() < 0.05
+    # Cells at their presence threshold, as in the test above: bounded, not zero.
+    assert (error > 0.05).mean() < 2e-4
     assert error.mean() < 1e-3

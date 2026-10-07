@@ -31,7 +31,7 @@ import numpy as np
 
 from . import clouds as _clouds
 
-__all__ = ["CloudscapeProfile", "CLOUDSCAPE_TYPES", "Cloudscape", "sample_wrapped",
+__all__ = ["CloudscapeProfile", "CLOUDSCAPE_TYPES", "Cloudscape", "sample_wrapped", "sample_aperiodic",
            "CLOUDSCAPE_SHAPE_KEYS", "cloudscape_from_state", "supports", "CloudPatch", "load_patches",
            "PATCH_DIRECTORIES"]
 
@@ -51,6 +51,17 @@ RAGGED_TILES = 6.0
 #: The small clouds: their lattice's period as a share of the large one's, and how much further
 #: into the weather map it reaches than the large clouds do.
 SMALL_PERIOD = 0.4
+
+#: The weather map is one 32 km tile; a camera sees 80 km. WX.22: each tile of the plane reads
+#: the map at its own hashed offset, so the cover pattern does not repeat, and neighbouring tiles
+#: cross-fade over this share of a tile at each border. The fade is done on the coverage's normal
+#: score with variance-preserving weights (Heitz & Neyret 2018), so the coverage stays uniform on
+#: 0..1 through it and the cover solve still holds; the tile at the origin keeps no offset.
+APERIODIC_BORDER = 0.25
+#: The hash channels the tiles' offsets are drawn on (``_cell_hash``'s third argument).
+APERIODIC_CHANNEL = 4051
+#: Coverage is clipped this far inside 0..1 before its normal score is taken.
+_SCORE_EPS = 1.0e-6
 SMALL_COVER = 1.5
 RAGGED_LOW = 0.25
 RAGGED_HIGH = 1.8
@@ -253,6 +264,76 @@ PATCH_CLOUDY_OPTICAL_DEPTH = 0.4
 PATCH_PLAN_VIEW_FRACTION = 0.5
 
 
+def _erf(x: np.ndarray) -> np.ndarray:
+    """Abramowitz & Stegun 7.1.26, |error| < 1.5e-7: ``gpu.cloud_march.erf_as``, term for term."""
+    a = np.abs(x)
+    t = 1.0 / (1.0 + 0.3275911 * a)
+    y = 1.0 - ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
+               + 0.254829592) * t * np.exp(-a * a)
+    return np.sign(x) * y
+
+
+def _erfinv(x: np.ndarray) -> np.ndarray:
+    """Giles (2010) single-precision inverse error function: ``gpu.cloud_march.erfinv_giles``."""
+    x = np.asarray(x, dtype=np.float64)
+    w = -np.log((1.0 - x) * (1.0 + x))
+    lo = w - 2.5
+    p_lo = 2.81022636e-08
+    for c in (3.43273939e-07, -3.5233877e-06, -4.39150654e-06, 0.00021858087, -0.00125372503,
+              -0.00417768164, 0.246640727, 1.50140941):
+        p_lo = c + p_lo * lo
+    hi = np.sqrt(np.maximum(w, 0.0)) - 3.0
+    p_hi = -0.000200214257
+    for c in (0.000100950558, 0.00134934322, -0.00367342844, 0.00573950773, -0.0076224613,
+              0.00943887047, 1.00167406, 2.83297682):
+        p_hi = c + p_hi * hi
+    return np.where(w < 5.0, p_lo, p_hi) * x
+
+
+def _fade(distance: np.ndarray) -> np.ndarray:
+    """A tile's own weight at ``distance`` (in tiles) from its nearer border: 1/2 on the border,
+    1 from :data:`APERIODIC_BORDER` in, smooth between."""
+    t = np.clip(distance / APERIODIC_BORDER, 0.0, 1.0)
+    return 0.5 + 0.5 * t * t * (3.0 - 2.0 * t)
+
+
+def sample_aperiodic(texture: np.ndarray, u: Any, v: Any, key: int, kind_mean: float) -> np.ndarray:
+    """The weather map at ``(u, v)`` in tile units, never repeating (WX.22).
+
+    Tile ``(i, j)`` reads the wrapped map at ``(u, v)`` plus its own hashed offset (zero at the
+    origin's tile). Within :data:`APERIODIC_BORDER` of a border the sample is a blend of up to
+    four tiles: the coverage on its normal score, ``Φ(Σ w g_k / √Σ w²)``, which keeps a uniform
+    coverage uniform; the type channel about its mean with the same weights. Inside a tile the
+    one sample is returned as it is.
+    """
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    u, v = np.broadcast_arrays(u, v)
+    i, j = np.floor(u), np.floor(v)
+    fu, fv = u - i, v - j
+    du = np.where(fu < 0.5, -1.0, 1.0)
+    dv = np.where(fv < 0.5, -1.0, 1.0)
+    au = _fade(np.minimum(fu, 1.0 - fu))
+    av = _fade(np.minimum(fv, 1.0 - fv))
+    tiles = ((i, j, au * av), (i + du, j, (1.0 - au) * av),
+             (i, j + dv, au * (1.0 - av)), (i + du, j + dv, (1.0 - au) * (1.0 - av)))
+    samples, weights = [], []
+    for ti, tj, w in tiles:
+        origin = (ti == 0.0) & (tj == 0.0)
+        ou = np.where(origin, 0.0, _cell_hash(ti, tj, key))
+        ov = np.where(origin, 0.0, _cell_hash(ti, tj, key + 1))
+        samples.append(sample_wrapped(texture, u + ou, v + ov))
+        weights.append(w)
+    single = weights[0] >= 1.0
+    norm = np.sqrt(sum(w * w for w in weights))
+    score = sum(w * np.sqrt(2.0) * _erfinv(2.0 * np.clip(s_[..., 0], _SCORE_EPS, 1.0 - _SCORE_EPS) - 1.0)
+                for w, s_ in zip(weights, samples)) / norm
+    coverage = 0.5 * (1.0 + _erf(score / np.sqrt(2.0)))
+    kind = kind_mean + sum(w * (s_[..., 1] - kind_mean) for w, s_ in zip(weights, samples)) / norm
+    blended = np.stack([coverage, np.clip(kind, 0.0, 1.0)], axis=-1)
+    return np.where(single[..., None], samples[0], blended)
+
+
 def sample_wrapped(texture: np.ndarray, *coords: Any) -> np.ndarray:
     """Linear interpolation of a tiling texture at normalised coordinates, texel centres at
     ``(i + 0.5) / n`` -- the convention of a GPU sampler in wrap mode.
@@ -313,6 +394,8 @@ class Cloudscape:
     detail: np.ndarray = field(init=False, repr=False)
     #: The coverage bias the cover solve found (see :meth:`_solve_cover`).
     coverage_bias: float = field(init=False, default=0.0)
+    #: The weather map's mean type, which the aperiodic blend fades about (WX.22).
+    kind_mean: float = field(init=False, default=0.5)
     #: Simulated patches of cloud. With any, they are the cloud: the weather map says which
     #: lattice cells hold one, and the noise function is not used. ``None`` or empty: the function.
     patches: Optional[List[CloudPatch]] = None
@@ -357,6 +440,7 @@ class Cloudscape:
             flat, 3.0, self.seed + 911, cell_size_m=size, min_wavelength_m=4.0 * p.spacing_m)[0]
         kind = np.clip(0.6 * coverage + 0.4 * slow, 0.0, 1.0)
         self.weather = np.stack([coverage, kind], axis=-1).astype(np.float32)
+        self.kind_mean = float(self.weather[..., 1].mean())
 
         m = self.shape_cells
         vox = p.shape_tile_m / m
@@ -479,7 +563,7 @@ class Cloudscape:
         x, y, z = np.broadcast_arrays(*(np.asarray(v, dtype=np.float64) for v in (x_m, y_m, z_m)))
         h = (y - self.base_m) / p.thickness_m
         inside = (h > 0.0) & (h < 1.0)
-        weather = sample_wrapped(self.weather, x / (p.stretch * self.weather_tile_m), z / self.weather_tile_m)
+        weather = self.weather_at(x / (p.stretch * self.weather_tile_m), z / self.weather_tile_m)
         coverage = np.clip(weather[..., 0] + bias, 0.0, 1.0)
         top = p.top_min + (p.top_max - p.top_min) * weather[..., 1]
         hr = h / top
@@ -527,7 +611,7 @@ class Cloudscape:
         cz = np.floor((z - shift) / period)
         mx = (cx + 0.5) * period + shift
         mz = (cz + 0.5) * period + shift
-        wc = sample_wrapped(self.weather, mx / self.weather_tile_m, mz / self.weather_tile_m)[..., 0]
+        wc = self.weather_at(mx / self.weather_tile_m, mz / self.weather_tile_m)[..., 0]
         rank = (wc - (1.0 - cover)) / max(cover, 1.0e-3)
         present = rank > 0.0
         if lattice == 2:
@@ -587,7 +671,19 @@ class Cloudscape:
             patch_erosion=float(p.patch_erosion), patch_fill=float(p.patch_fill),
             small_keep=float(p.small_keep), tower_count=len(self.towers or []),
             tower_size=tuple(float(v) for v in self.tower_size_m),
-            towers=float(p.towers) if self.towers else 0.0)
+            towers=float(p.towers) if self.towers else 0.0,
+            kind_mean=float(self.kind_mean), aperiodic_key=int(self.aperiodic_key),
+            aperiodic_border=float(APERIODIC_BORDER), weather_cells=int(self.weather.shape[0]))
+
+    @property
+    def aperiodic_key(self) -> int:
+        """The hash channel this cloudscape's tile offsets are drawn on: its seed's own."""
+        return APERIODIC_CHANNEL + 2 * int(self.seed)
+
+    def weather_at(self, u: Any, v: Any) -> np.ndarray:
+        """The weather map at ``(u, v)`` in tile units, the same everywhere a camera can see
+        only once (:func:`sample_aperiodic`, WX.22)."""
+        return sample_aperiodic(self.weather, u, v, self.aperiodic_key, self.kind_mean)
 
     def measured_cover(self, columns: int = 256) -> float:
         """Fraction of columns holding cloud a camera cannot see through, on a fresh lattice."""

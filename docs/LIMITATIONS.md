@@ -34,8 +34,11 @@ is about the model as it stands.
 - The microphysics is **one effective size per genus**, derived water content, and a fixed ice
   fraction. No adiabatic growth of LWC or droplet size with height, no drizzle, and no vertical
   phase transition inside a mixed cloud (the ice fraction is uniform through it).
-- The deck **tiles horizontally**. The domain is `cells × cell_m` across — 15 km at the defaults —
-  and repeats beyond that, which is visible near the horizon if you look for it.
+- The **voxel** deck (the dome and the path tracer's volumes) **tiles horizontally**. The domain is
+  `cells × cell_m` across — 15 km at the defaults — and repeats beyond that, which is visible near
+  the horizon if you look for it. The per-pixel cloudscape does not: each 32 km tile of the plane
+  reads the weather map at its own hashed offset, cross-faded at the borders on the coverage's
+  normal score (`core.cloudscape.sample_aperiodic`), so its cover pattern never repeats.
 - Cloud scattering is a multi-octave approximation wrapped in a two-stream albedo envelope, not a
   path trace. It gets the *energy* right and the directional detail approximately; it does not
   produce a fogbow or a glory.

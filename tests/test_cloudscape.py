@@ -107,18 +107,54 @@ def test_the_top_is_crisp_and_the_base_is_soft(cumulus: C.Cloudscape) -> None:
     assert high < 40.0
 
 
-def test_the_layer_wraps_with_the_weather_map(cumulus: C.Cloudscape) -> None:
+def test_the_cover_pattern_does_not_repeat_at_the_weather_tile(cumulus: C.Cloudscape) -> None:
+    """WX.22's criterion: the cloud mask one weather tile (32 km) away is not the same mask. A
+    camera sees 80 km, so a periodic map put the same cover pattern in one frame two or three
+    times; with each tile reading the map at its own offset the masks' correlation at that lag is
+    under 0.1 (it was 1.0 by construction -- the plain wrapped lookup shows it)."""
     tile = cumulus.weather_tile_m
-    pts = np.random.default_rng(0).uniform(0.0, tile, (200, 2))
-    y = cumulus.base_m + 200.0
-    a = cumulus.density(pts[:, 0], y, pts[:, 1])
-    # The shape and detail tiles divide the weather tile only by luck, so compare where all wrap.
-    period = np.lcm.reduce([int(round(tile)), int(round(cumulus.profile.shape_tile_m)),
-                            int(round(cumulus.profile.detail_tile_m))])
-    b = cumulus.density(pts[:, 0] + period, y, pts[:, 1] - period)
-    assert np.allclose(a, b, atol=1e-6)
+    n = 96
+    axis = (np.arange(n) + 0.5) / n * tile + 0.5 * tile  # straddles a border between tiles
+    x, z = np.meshgrid(axis, axis, indexing="xy")
+    od = cumulus._column_optical_depth
+    here = od(x, z, cumulus.coverage_bias, 10) > cumulus._cloudy_optical_depth
+    there = od(x + tile, z, cumulus.coverage_bias, 10) > cumulus._cloudy_optical_depth
+    assert 0.1 < here.mean() < 0.7
+    r = np.corrcoef(here.ravel().astype(float), there.ravel().astype(float))[0, 1]
+    assert abs(r) < 0.1, r
+    u, v = x / tile, z / tile
+    wrapped = C.sample_wrapped(cumulus.weather, u, v)[..., 0]
+    assert np.allclose(wrapped, C.sample_wrapped(cumulus.weather, u + 1.0, v)[..., 0])
 
 
+def test_the_blend_keeps_the_coverage_uniform_and_the_origin_tile_as_it_was(
+        cumulus: C.Cloudscape) -> None:
+    """The cross-fade is on the coverage's normal score with variance-preserving weights, so the
+    coverage stays uniform on 0..1 through the borders and the cover solve still means what it
+    says; inside the origin's tile, the map is read exactly as before."""
+    rng = np.random.default_rng(3)
+    u, v = rng.uniform(-3.0, 3.0, (2, 40_000))
+    cov = cumulus.weather_at(u, v)[..., 0]
+    q = np.quantile(cov, [0.1, 0.25, 0.5, 0.75, 0.9])
+    ref = np.quantile(C.sample_wrapped(cumulus.weather, u, v)[..., 0], [0.1, 0.25, 0.5, 0.75, 0.9])
+    assert np.max(np.abs(q - ref)) < 0.03, (q, ref)
+    inner = rng.uniform(C.APERIODIC_BORDER, 1.0 - C.APERIODIC_BORDER, (2, 2000))
+    assert np.array_equal(cumulus.weather_at(*inner), C.sample_wrapped(cumulus.weather, *inner))
+
+
+def test_no_seam_where_two_tiles_meet(cumulus: C.Cloudscape) -> None:
+    """At a border each side is half the blend of the same two tiles, so the map is continuous
+    there: a step across it of a micro-tile changes the coverage by no more than the texture's
+    own slope allows."""
+    t = np.linspace(-2.0, 2.0, 41)
+    eps = 1.0e-7
+    for u_border in (1.0, -1.0, 2.0):
+        a = cumulus.weather_at(np.full_like(t, u_border - eps), t)
+        b = cumulus.weather_at(np.full_like(t, u_border + eps), t)
+        assert np.max(np.abs(a - b)) < 1e-3
+        a = cumulus.weather_at(t, np.full_like(t, u_border - eps))
+        b = cumulus.weather_at(t, np.full_like(t, u_border + eps))
+        assert np.max(np.abs(a - b)) < 1e-3
 
 
 @pytest.fixture(scope="module")
